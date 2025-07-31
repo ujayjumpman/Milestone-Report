@@ -5,6 +5,7 @@ import os
 import time
 from datetime import datetime
 import glob
+import traceback
 
 # Page configuration
 st.set_page_config(
@@ -346,6 +347,18 @@ st.markdown("""
             margin-left: 0.5rem;
         }
     }
+    
+    /* Debug info styling */
+    .debug-info {
+        background: linear-gradient(135deg, #f0f4f8, #e2e8f0);
+        border: 2px solid #718096;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 1rem 0;
+        font-family: monospace;
+        font-size: 0.9rem;
+        color: #2d3748;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -356,37 +369,61 @@ if 'messages' not in st.session_state:
     st.session_state.selected_project = None
     st.session_state.report_file = None
 
-# Project configurations - Fixed script names and patterns
+# Project configurations - Enhanced with better debugging
 PROJECTS = {
     'Veridia': {
         'script': 'veridia.py',
         'display_name': 'Veridia',
         'icon': '🌿',
-        'pattern': 'Time_Delivery_Milestones_Report_*.xlsx'  # Based on original code
+        'patterns': [
+            'Time_Delivery_Milestones_Report_*.xlsx',
+            '*Veridia*.xlsx',
+            'Veridia_*.xlsx',
+            '*veridia*.xlsx'
+        ]
     },
     'Eligo': {
         'script': 'eligo.py', 
         'display_name': 'Eligo',
         'icon': '⚡',
-        'pattern': '*Eligo*.xlsx'
+        'patterns': [
+            '*Eligo*.xlsx',
+            'Eligo_*.xlsx',
+            '*eligo*.xlsx'
+        ]
     },
     'EWS-LIG': {
-        'script': 'ews-lig.py',  # Fixed script name
+        'script': 'ews-lig.py',
         'display_name': 'EWS-LIG',
         'icon': '🔍',
-        'pattern': '*EWS*LIG*.xlsx'
+        'patterns': [
+            '*EWS*LIG*.xlsx',
+            '*EWS-LIG*.xlsx',
+            'EWS_LIG_*.xlsx',
+            '*ews*lig*.xlsx'
+        ]
     },
-    'WaveCityClub': {  # Fixed key name
+    'WaveCityClub': {
         'script': 'wavecityclub.py',
         'display_name': 'WaveCityClub',
         'icon': '🌊',
-        'pattern': 'Wave_City_Club_Report_*.xlsx'  # Based on original code
+        'patterns': [
+            'Wave_City_Club_Report_*.xlsx',
+            '*WaveCityClub*.xlsx',
+            '*Wave*City*Club*.xlsx',
+            '*wavecityclub*.xlsx'
+        ]
     },
     'Eden': {
         'script': 'eden.py',
         'display_name': 'Eden',
         'icon': '🏡',
-        'pattern': 'Eden_KRA_Milestone_Report_*.xlsx'  # Based on Eden script
+        'patterns': [
+            'Eden_KRA_Milestone_Report_*.xlsx',
+            '*Eden*.xlsx',
+            'Eden_*.xlsx',
+            '*eden*.xlsx'
+        ]
     }
 }
 
@@ -418,75 +455,199 @@ def display_chat_message(message):
         </div>
         """, unsafe_allow_html=True)
 
+def find_generated_file(project_config, project_name):
+    """Find the generated report file using multiple patterns"""
+    patterns = project_config['patterns']
+    
+    # Store files before execution for comparison
+    files_before = set(glob.glob("*.xlsx"))
+    
+    for pattern in patterns:
+        st.write(f"🔍 Searching with pattern: {pattern}")
+        matches = glob.glob(pattern)
+        if matches:
+            # Get the most recent file
+            latest_file = max(matches, key=os.path.getctime)
+            file_time = os.path.getctime(latest_file)
+            current_time = time.time()
+            
+            # Check if file was created recently (within last 10 minutes)
+            if (current_time - file_time) < 600:  # 10 minutes
+                st.write(f"✅ Found recent file: {latest_file}")
+                return latest_file
+            else:
+                st.write(f"⏰ File found but too old: {latest_file}")
+    
+    # Check for any new Excel files created
+    files_after = set(glob.glob("*.xlsx"))
+    new_files = files_after - files_before
+    
+    if new_files:
+        latest_new_file = max(new_files, key=os.path.getctime)
+        st.write(f"📄 Found new Excel file: {latest_new_file}")
+        return latest_new_file
+    
+    return None
+
 def run_project_script(project_name):
     """Run the project script and return the generated file path"""
     try:
         project_config = PROJECTS[project_name]
         script_path = project_config['script']
         
+        # Enhanced debugging information
+        st.write(f"🔧 **Debug Information for {project_name}:**")
+        st.write(f"📝 Script path: {script_path}")
+        st.write(f"📁 Current directory: {os.getcwd()}")
+        st.write(f"🐍 Python executable: {sys.executable}")
+        
         # Check if script file exists
         if not os.path.exists(script_path):
-            return False, f"Script file '{script_path}' not found. Please ensure the file exists in the current directory."
+            available_files = [f for f in os.listdir('.') if f.endswith('.py')]
+            return False, f"❌ Script file '{script_path}' not found in current directory.\n\nAvailable Python files: {available_files}\n\nPlease ensure '{script_path}' exists in the current directory."
         
-        # Add logging for debugging
-        st.write(f"🔄 Running script: {script_path}")
+        st.write(f"✅ Script file found: {script_path}")
         
-        # Execute the script
-        result = subprocess.run(
-            [sys.executable, script_path],
-            capture_output=True,
-            text=True,
-            timeout=300  # 5 minutes timeout
-        )
+        # Store existing Excel files before execution
+        files_before = set(glob.glob("*.xlsx"))
+        st.write(f"📊 Excel files before execution: {len(files_before)}")
+        
+        # Execute the script with enhanced error capture
+        st.write(f"🚀 Executing script: {script_path}")
+        
+        # Create a real-time progress indicator
+        start_time = time.time()
+        progress_placeholder = st.empty()
+        
+        try:
+            # For Veridia specifically, increase timeout and add environment variables
+            timeout_duration = 600 if project_name == 'Veridia' else 300  # 10 minutes for Veridia, 5 for others
+            
+            # Set environment variables to prevent hanging
+            env = os.environ.copy()
+            env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
+            env['MPLBACKEND'] = 'Agg'      # Use non-interactive matplotlib backend
+            
+            progress_placeholder.info(f"⏱️ Running {project_name} script... (Max wait: {timeout_duration//60} minutes)")
+            
+            result = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                timeout=timeout_duration,
+                cwd=os.getcwd(),
+                env=env  # Use modified environment
+            )
+            
+            elapsed_time = time.time() - start_time
+            progress_placeholder.success(f"✅ Script completed in {elapsed_time:.1f} seconds")
+            
+        except subprocess.TimeoutExpired:
+            elapsed_time = time.time() - start_time
+            progress_placeholder.error(f"⏱️ Script timed out after {elapsed_time:.1f} seconds")
+            
+            # For Veridia timeout, provide specific guidance
+            if project_name == 'Veridia':
+                timeout_msg = f"""
+⏱️ **Veridia script timed out after {timeout_duration//60} minutes.**
+
+This usually indicates one of these issues:
+
+1. **Large dataset processing**: The script may be processing very large Excel/CSV files
+2. **Infinite loop**: There might be a bug causing the script to loop indefinitely  
+3. **External dependencies**: The script might be waiting for a database connection, API response, or file lock
+4. **Memory issues**: The script might have run out of memory with large datasets
+
+**Immediate solutions to try:**
+1. Check if there are any large input files that could be causing the delay
+2. Run `veridia.py` manually from command line to see where it gets stuck
+3. Check if any input files are locked or being used by other programs
+4. Monitor system resources (CPU/Memory) while the script runs
+
+**To debug manually:**
+```bash
+cd /path/to/your/script/directory
+python veridia.py
+```
+
+This will show you exactly where the script stops or gets stuck.
+                """
+            else:
+                timeout_msg = f"⏱️ Script execution timed out ({timeout_duration//60} minutes). The script may be stuck or processing large amounts of data."
+            
+            return False, timeout_msg
+        
+        # Enhanced result logging
+        st.write(f"📤 Script execution completed with return code: {result.returncode}")
+        
+        if result.stdout:
+            st.write("📄 **Script Output (stdout):**")
+            st.code(result.stdout[:1000] + ("..." if len(result.stdout) > 1000 else ""))
+        
+        if result.stderr:
+            st.write("⚠️ **Script Errors (stderr):**")
+            st.code(result.stderr[:1000] + ("..." if len(result.stderr) > 1000 else ""))
         
         # Check execution result
         if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "Unknown error occurred"
-            st.error(f"Script execution failed: {error_msg[:500]}...")
-            return False, f"Script execution failed:\n{error_msg[:500]}..."
+            error_details = f"""
+Return Code: {result.returncode}
+STDOUT: {result.stdout}
+STDERR: {result.stderr}
+            """
+            return False, f"❌ Script execution failed with return code {result.returncode}.\n\nDetails:\n{error_details}"
         
-        # Log success
-        if result.stdout:
-            st.write(f"✅ Script output: {result.stdout[:200]}...")
+        # Check for new files after execution
+        files_after = set(glob.glob("*.xlsx"))
+        new_files = files_after - files_before
+        st.write(f"📊 Excel files after execution: {len(files_after)} (New: {len(new_files)})")
         
-        # Look for generated file using project-specific pattern
-        pattern = project_config['pattern']
-        st.write(f"🔍 Looking for files matching pattern: {pattern}")
+        if new_files:
+            st.write(f"🆕 New Excel files created: {list(new_files)}")
         
-        matches = glob.glob(pattern)
+        # Look for generated file using project-specific patterns
+        generated_file = find_generated_file(project_config, project_name)
         
-        if not matches:
-            # Fallback patterns
-            fallback_patterns = [
-                f"*{project_config['display_name']}*.xlsx",
-                f"*{project_name}*.xlsx",
-                "*.xlsx"
-            ]
-            
-            for fallback_pattern in fallback_patterns:
-                st.write(f"🔍 Trying fallback pattern: {fallback_pattern}")
-                matches = glob.glob(fallback_pattern)
-                if matches:
-                    break
+        if generated_file and os.path.exists(generated_file):
+            file_size = os.path.getsize(generated_file)
+            st.write(f"✅ **Report file found:** {generated_file} ({file_size:,} bytes)")
+            return True, generated_file
         
-        if not matches:
-            # List all Excel files for debugging
-            all_excel = glob.glob("*.xlsx")
-            st.write(f"📁 All Excel files found: {all_excel}")
-            return False, f"Report was generated but no matching file found. Pattern used: {pattern}. Available Excel files: {all_excel}"
+        # If no file found, provide detailed diagnostics
+        all_excel = glob.glob("*.xlsx")
+        error_msg = f"""
+❌ **Report file not found after script execution.**
+
+**Diagnostics:**
+- Script executed successfully (return code: {result.returncode})
+- Patterns searched: {project_config['patterns']}
+- All Excel files in directory: {all_excel}
+- New files created: {list(new_files) if new_files else 'None'}
+
+**Possible issues:**
+1. The script may not be generating an Excel file
+2. The file may be saved in a different directory
+3. The filename pattern may not match our search patterns
+4. The script may have failed silently
+
+**Script Output:**
+STDOUT: {result.stdout[:500]}...
+STDERR: {result.stderr[:500]}...
+        """
         
-        # Get the most recent file
-        latest_file = max(matches, key=os.path.getctime)
-        st.write(f"📊 Found report file: {latest_file}")
-        
-        return True, latest_file
+        return False, error_msg
 
     except subprocess.TimeoutExpired:
-        return False, "Script execution timed out (5 minutes). Please try again or check if the script is stuck."
-    except FileNotFoundError:
-        return False, f"Python interpreter not found. Please ensure Python is installed and accessible."
+        return False, "⏱️ Script execution timed out. Please check the specific timeout message above for details."
+    except FileNotFoundError as e:
+        return False, f"❌ Python interpreter not found: {str(e)}. Please ensure Python is installed and accessible."
     except Exception as e:
-        return False, f"Unexpected error running script: {str(e)}"
+        error_details = f"""
+Exception Type: {type(e).__name__}
+Exception Message: {str(e)}
+Traceback: {traceback.format_exc()}
+        """
+        return False, f"❌ Unexpected error occurred:\n{error_details}"
 
 def main():
     st.markdown('<div class="main-container">', unsafe_allow_html=True)
@@ -555,8 +716,10 @@ def main():
         progress_bar.empty()
         status_text.empty()
         
-        # Run the actual script
-        success, result = run_project_script(proj)
+        # Create a debug expander for detailed logging
+        with st.expander("🔍 Debug Information", expanded=True):
+            # Run the actual script
+            success, result = run_project_script(proj)
         
         if success:
             st.session_state.report_file = result
@@ -623,8 +786,29 @@ def main():
 
         # Show error details
         if hasattr(st.session_state, 'error_message'):
-            with st.expander("🔍 Error Details"):
+            with st.expander("🔍 Detailed Error Information", expanded=True):
                 st.code(st.session_state.error_message)
+
+        # Troubleshooting tips
+        with st.expander("💡 Troubleshooting Tips"):
+            st.markdown(f"""
+            **Common issues and solutions:**
+            
+            1. **Script file missing**: Ensure `{info.get('script', 'unknown.py')}` exists in the same directory as this Streamlit app.
+            
+            2. **Import errors**: Check if all required Python packages are installed.
+            
+            3. **Data file missing**: Ensure any required input data files are in the correct location.
+            
+            4. **Permission issues**: Check if the script has permission to write files to the current directory.
+            
+            5. **Path issues**: Verify that all file paths in the script are correct.
+            
+            **Next steps:**
+            - Try running `{info.get('script', 'unknown.py')}` manually from the command line
+            - Check the script's dependencies and requirements
+            - Verify input data files are present and accessible
+            """)
 
         # Action buttons
         col1, col2 = st.columns(2)

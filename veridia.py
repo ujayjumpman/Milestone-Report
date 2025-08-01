@@ -649,7 +649,7 @@ def get_green3_targets_and_progress(cos):
     return df_green3
 
 # -----------------------------------------------------------------------------
-# WRITER / STYLING (NO UGLY OUTPUT!)
+# WRITER / STYLING - UPDATED WITH DATE DISPLAY
 # -----------------------------------------------------------------------------
 
 def write_excel_report(df_t6, df_t5, df_t7, df_green3, filename):
@@ -657,14 +657,37 @@ def write_excel_report(df_t6, df_t5, df_t7, df_green3, filename):
     ws = wb.active
     ws.title = "Time Delivery Milestones"
 
+    # Add title and date at the top
+    current_date = datetime.now().strftime("%d-%m-%Y")
+    ws.append(["Veridia Time Delivery Milestones Report"])
+    ws.append([f"Report Generated on: {current_date}"])
+    ws.append([])  # Empty row for spacing
+
+    # Define styles
     yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-    grey = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")  # Grey fill for headers
+    grey = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
     bold_font = Font(bold=True)
     normal_font = Font(bold=False)
+    title_font = Font(bold=True, size=14)
+    date_font = Font(bold=False, size=10, color="666666")
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
     thin = Side(style="thin", color="000000")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
+
+    # Get max columns for merging
+    max_cols = max(len(df_t6.columns), len(df_t5.columns), len(df_t7.columns), len(df_green3.columns))
+    
+    # Style title row (row 1)
+    ws.merge_cells(f'A1:{get_column_letter(max_cols)}1')
+    ws['A1'].font = title_font
+    ws['A1'].alignment = center_align
+    ws['A1'].fill = grey
+    
+    # Style date row (row 2)
+    ws.merge_cells(f'A2:{get_column_letter(max_cols)}2')
+    ws['A2'].font = date_font
+    ws['A2'].alignment = center_align
 
     def append_df_block(title, df, total_delay_label):
         """Write section title, dataframe and total delay row. Return (start_row, end_row)."""
@@ -738,7 +761,7 @@ def write_excel_report(df_t6, df_t5, df_t7, df_green3, filename):
 
         return title_row, delay_row
 
-    # Write all sections without extra empty rows
+    # Write all sections without extra empty rows (after title, date, and empty row)
     append_df_block("Tower 6 Progress Against Milestones", df_t6, "Total Delay Tower 6")
     append_df_block("Tower 5 Progress Against Milestones", df_t5, "Total Delay Tower 5")
     append_df_block("Tower 7 Progress Against Milestones", df_t7, "Total Delay Tower 7")
@@ -788,7 +811,7 @@ def main():
     logger.info("Calculating Green 3 External Development Work progress...")
     df_green3 = get_green3_targets_and_progress(cos)
 
-    filename = f"Time_Delivery_Milestones_Report_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    filename = f"Veridia_Time_Delivery_Milestone_Report ({datetime.now():%Y-%m-%d}).xlsx"
     logger.info("Writing Excel report...")
     write_excel_report(df_t6, df_t5, df_t7, df_green3, filename)
 

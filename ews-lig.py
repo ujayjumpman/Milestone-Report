@@ -168,14 +168,38 @@ def write_excel_report(dfs, filename):
     ws = wb.active
     ws.title = "EWS-LIG Milestones"
 
+    # Add title and date at the top
+    current_date = datetime.now().strftime("%d-%m-%Y")
+    ws.append(["EWS-LIG Milestones Report"])
+    ws.append([f"Report Generated on: {current_date}"])
+    ws.append([])  # Empty row for spacing
+
+    # Define styles
     bold_font = Font(bold=True)
     normal_font = Font(bold=False)
+    title_font = Font(bold=True, size=14)
+    date_font = Font(bold=False, size=10, color="666666")
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
     thin = Side(style="thin", color="000000")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    
+    # Get max columns for merging (from first dataframe)
+    max_cols = len(dfs[0][1].columns) if dfs else 12  # fallback to 12 columns
+    
+    # Style title row (row 1)
+    ws.merge_cells(f'A1:{get_column_letter(max_cols)}1')
+    ws['A1'].font = title_font
+    ws['A1'].alignment = center_align
+    ws['A1'].fill = GREY
+    
+    # Style date row (row 2)
+    ws.merge_cells(f'A2:{get_column_letter(max_cols)}2')
+    ws['A2'].font = date_font
+    ws['A2'].alignment = center_align
 
     for title, df, total_label in dfs:
+        # Section title row
         ws.append([title])
         title_row = ws.max_row
         ws.merge_cells(start_row=title_row, start_column=1,
@@ -186,20 +210,27 @@ def write_excel_report(dfs, filename):
             cell.alignment = center_align
             cell.border = border
 
+        # DataFrame rows
         for r in dataframe_to_rows(df, index=False, header=True):
             ws.append(r)
         header_row = title_row + 1
         body_start = header_row + 1
         body_end = ws.max_row
+        
+        # Header styling
         for cell in ws[header_row]:
             cell.font = bold_font
             cell.alignment = center_align
             cell.border = border
+            
+        # Body styling
         for r in range(body_start, body_end + 1):
             for cell in ws[r]:
                 cell.font = normal_font
                 cell.alignment = left_align if cell.col_idx in (1, 2) else center_align
                 cell.border = border
+                
+        # Total delay row
         try:
             total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"] if v and str(v).strip())
         except Exception:
@@ -221,11 +252,15 @@ def write_excel_report(dfs, filename):
             cell.alignment = left_align if idx == 1 else center_align
             cell.border = border
 
+    # Column widths
     for col in ws.columns:
         max_len = max(len(str(cell.value or "")) for cell in col)
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 60)
+    
+    # Row heights
     for r in range(1, ws.max_row + 1):
         ws.row_dimensions[r].height = 22
+    
     wb.save(filename)
     logger.info(f"EWS-LIG report saved to {filename}")
 
@@ -255,7 +290,7 @@ def main():
     completed_t2 = count_pours(sheet, TOWER2_POUR_COLS, TOWER2_ROW_START, TOWER2_ROW_END, MONTHS, tracker_year)
     df_t2 = build_structure_dataframe("Tower 2", targets_t2, completed_t2)
 
-    filename = f"EWS_LIG_Milestones_Report_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    filename = f"EWS_LIG_Milestone_Report ({datetime.now():%Y-%m-%d}).xlsx"
     dfs = [
         ("Tower 1 Structure Progress Against Milestones", df_t1, "Total Delay Tower 1 Structure"),
         ("Tower 3 Structure Progress Against Milestones", df_t3, "Total Delay Tower 3 Structure"),

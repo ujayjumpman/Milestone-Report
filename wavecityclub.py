@@ -308,7 +308,7 @@ def get_wcc_progress_from_tracker(cos, targets, tracker_key):
     return pd.DataFrame(progress_data, columns=cols)
 
 # -----------------------------------------------------------------------------
-# EXCEL WRITER / STYLING
+# EXCEL WRITER / STYLING - UPDATED WITH DATE DISPLAY
 # -----------------------------------------------------------------------------
 
 def write_wcc_excel_report(df, filename):
@@ -316,19 +316,39 @@ def write_wcc_excel_report(df, filename):
     ws = wb.active
     ws.title = 'Wave City Club Progress'
     
+    # Add title and date at the top
+    current_date = datetime.now().strftime("%d-%m-%Y")
+    ws.append(["Wave City Club Structure Work Progress"])
+    ws.append([f"Report Generated on: {current_date}"])
+    ws.append([])  # Empty row for spacing
+    
+    # Define styles
     yellow = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
     grey   = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
     bold   = Font(bold=True)
     norm   = Font(bold=False)
+    title_font = Font(bold=True, size=14)
+    date_font = Font(bold=False, size=10, color="666666")
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     left   = Alignment(horizontal='left', vertical='center', wrap_text=True)
     thin   = Side(style='thin', color='000000')
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    
+    # Style title row (row 1)
+    ws.merge_cells(f'A1:{get_column_letter(len(df.columns))}1')
+    ws['A1'].font = title_font
+    ws['A1'].alignment = center
+    ws['A1'].fill = grey
+    
+    # Style date row (row 2)
+    ws.merge_cells(f'A2:{get_column_letter(len(df.columns))}2')
+    ws['A2'].font = date_font
+    ws['A2'].alignment = center
 
     def append_block(title, df_block, total_label):
         start, end = 1, len(df_block.columns)
         
-        # Title row
+        # Title row for the section
         ws.append([title])
         title_row = ws.max_row
         ws.merge_cells(start_row=title_row, start_column=start, end_row=title_row, end_column=end)
@@ -361,7 +381,7 @@ def write_wcc_excel_report(df, filename):
         
         # No total delay row needed since we removed weighted delay columns
 
-    # Write the report
+    # Write the report (starting after the title, date, and empty row)
     append_block('Wave City Club Structure Work Progress Against Milestones', df, '')
     
     # Adjust column widths
@@ -398,7 +418,7 @@ def main():
     
     df = get_wcc_progress_from_tracker(cos, targets, tracker_key)
     
-    filename = f"Wave_City_Club_Progress_Report_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    filename = f"Wave_City_Club_Milestone_Report ({datetime.now():%Y-%m-%d}).xlsx"
     logger.info("Writing Excel report...")
     write_wcc_excel_report(df, filename)
     logger.info("Completed!")

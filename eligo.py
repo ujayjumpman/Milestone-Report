@@ -487,23 +487,51 @@ def build_tower_h_finishing_dataframe(targets, completed):
     return df_th_finishing
 
 # ---------------------------------------------------------------------------
-# WRITER / STYLING
+# WRITER / STYLING - UPDATED WITH DATE DISPLAY
 # ---------------------------------------------------------------------------
 def write_excel_report(df_tg_structure, df_th_structure, df_tg_finishing, df_th_finishing, filename):
     wb = Workbook()
     ws = wb.active
     ws.title = "Eligo Time Delivery Milestones"
+    
+    # Add title and date at the top
+    current_date = datetime.now().strftime("%d-%m-%Y")
+    ws.append(["Eligo Time Delivery Milestones"])
+    ws.append([f"Report Generated on: {current_date}"])
+    ws.append([])  # Empty row for spacing
+    
+    # Define styles
     yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     grey = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
     bold_font = Font(bold=True)
     normal_font = Font(bold=False)
+    title_font = Font(bold=True, size=14)
+    date_font = Font(bold=False, size=10, color="666666")
     center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
     left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
     thin = Side(style="thin", color="000000")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    
+    # Get max columns for merging
+    max_cols = max(len(df_tg_structure.columns), len(df_th_structure.columns), 
+                   len(df_tg_finishing.columns), len(df_th_finishing.columns))
+    
+    # Style title row (row 1)
+    ws.merge_cells(f'A1:{get_column_letter(max_cols)}1')
+    ws['A1'].font = title_font
+    ws['A1'].alignment = center_align
+    ws['A1'].fill = grey
+    
+    # Style date row (row 2)
+    ws.merge_cells(f'A2:{get_column_letter(max_cols)}2')
+    ws['A2'].font = date_font
+    ws['A2'].alignment = center_align
+    
     def append_df_block(title, df, total_delay_label):
         start_col = 1
         end_col = len(df.columns)
+        
+        # Section title row
         ws.append([title])
         title_row = ws.max_row
         ws.merge_cells(start_row=title_row, start_column=start_col,
@@ -513,20 +541,28 @@ def write_excel_report(df_tg_structure, df_th_structure, df_tg_finishing, df_th_
             cell.font = bold_font
             cell.alignment = center_align
             cell.border = border
+            
+        # DataFrame rows
         for r in dataframe_to_rows(df, index=False, header=True):
             ws.append(r)
         header_row = title_row + 1
         body_start = header_row + 1
         body_end = ws.max_row
+        
+        # Header styling
         for cell in ws[header_row]:
             cell.font = bold_font
             cell.alignment = center_align
             cell.border = border
+            
+        # Body styling
         for r in range(body_start, body_end + 1):
             for cell in ws[r]:
                 cell.font = bold_font if r in ROWS_TO_BOLD else normal_font
                 cell.alignment = left_align if cell.col_idx in (1, 2) else center_align
                 cell.border = border
+                
+        # Total delay row
         try:
             total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"] if v)
         except Exception:
@@ -553,18 +589,25 @@ def write_excel_report(df_tg_structure, df_th_structure, df_tg_finishing, df_th_
                 cell.alignment = center_align
             cell.border = border
         return title_row, delay_row
+        
+    # Write all sections (after title, date, and empty row)
     append_df_block("Tower G Structure Progress Against Milestones", df_tg_structure, "Total Delay Tower G Structure")
     append_df_block("Tower H Structure Progress Against Milestones", df_th_structure, "Total Delay Tower H Structure")
     append_df_block("Tower G Finishing Progress Against Milestones", df_tg_finishing, "Total Delay Tower G Finishing")
     append_df_block("Tower H Finishing Progress Against Milestones", df_th_finishing, "Total Delay Tower H Finishing")
+    
+    # Column widths
     for col in ws.columns:
         max_len = 0
         for cell in col:
             text = str(cell.value) if cell.value is not None else ""
             max_len = max(max_len, len(text.split("\n")[0]))
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 60)
+    
+    # Row heights
     for r in range(1, ws.max_row + 1):
         ws.row_dimensions[r].height = 22
+    
     wb.save(filename)
     logger.info(f"Eligo report saved to {filename}")
 
@@ -589,7 +632,7 @@ def main():
     targets_th_finishing = get_tower_h_finishing_targets()
     completed_th_finishing = count_tower_h_finishing_completed(cos)
     df_th_finishing = build_tower_h_finishing_dataframe(targets_th_finishing, completed_th_finishing)
-    filename = f"Eligo_Time_Delivery_Milestones_Report_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+    filename = f"Eligo_Time_Delivery_Milestone_Report ({datetime.now():%Y-%m-%d}).xlsx"
     logger.info("Writing Eligo Excel report...")
     write_excel_report(df_tg_structure, df_th_structure, df_tg_finishing, df_th_finishing, filename)
     logger.info("Eligo milestone report generation completed successfully!")

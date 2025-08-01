@@ -6,6 +6,7 @@ import pandas as pd
 from openpyxl import load_workbook, Workbook
 from openpyxl.utils.dataframe import dataframe_to_rows
 from openpyxl.styles import Font, Alignment, PatternFill, Border, Side
+from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
 import ibm_boto3
 from ibm_botocore.client import Config
@@ -273,12 +274,18 @@ def main():
         existing_columns = [col for col in column_order if col in df.columns]
         df = df[existing_columns]
         
-        filename = f"Eden_KRA_Milestone_Report_{datetime.now():%Y%m%d_%H%M%S}.xlsx"
+        filename = f"Eden_KRA_Milestone_Report ({datetime.now():%Y-%m-%d}).xlsx"
         
         # Create formatted Excel file
         wb = Workbook()
         ws = wb.active
         ws.title = "Eden KRA Milestone Progress"
+        
+        # Add title and date at the top
+        current_date = datetime.now().strftime("%d-%m-%Y")
+        ws.append(["Eden KRA Milestone Progress"])
+        ws.append([f"Report Generated on: {current_date}"])
+        ws.append([])  # Empty row for spacing
         
         # Add data
         for r in dataframe_to_rows(df, index=False, header=True):
@@ -286,6 +293,8 @@ def main():
         
         # Format the worksheet
         header_font = Font(bold=True, size=11, color="FFFFFF")
+        title_font = Font(bold=True, size=14, color="000000")
+        date_font = Font(bold=False, size=10, color="666666")
         data_font = Font(size=10)
         center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
         left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
@@ -297,15 +306,25 @@ def main():
         )
         header_fill = PatternFill(start_color="4472C4", end_color="4472C4", fill_type="solid")
         
-        # Format headers
-        for cell in ws[1]:
+        # Format title row (row 1)
+        ws.merge_cells(f'A1:{get_column_letter(len(df.columns))}1')
+        ws['A1'].font = title_font
+        ws['A1'].alignment = center_align
+        
+        # Format date row (row 2)
+        ws.merge_cells(f'A2:{get_column_letter(len(df.columns))}2')
+        ws['A2'].font = date_font
+        ws['A2'].alignment = center_align
+        
+        # Format headers (row 4, since we added title, date, and empty row)
+        for cell in ws[4]:
             cell.font = header_font
             cell.alignment = center_align
             cell.border = border
             cell.fill = header_fill
         
-        # Format data rows
-        for row_idx, row in enumerate(ws.iter_rows(min_row=2, max_row=ws.max_row), 2):
+        # Format data rows (starting from row 5)
+        for row_idx, row in enumerate(ws.iter_rows(min_row=5, max_row=ws.max_row), 5):
             for col_idx, cell in enumerate(row, 1):
                 cell.border = border
                 cell.font = data_font
@@ -338,11 +357,12 @@ def main():
                 column_widths[col_letter] = base_width + (3 if i == 1 else 0)
         
         for col_letter, width in column_widths.items():
-            if col_letter in [cell.column_letter for cell in ws[1]]:
-                ws.column_dimensions[col_letter].width = width
+            ws.column_dimensions[col_letter].width = width
         
-        # Set row height for header
-        ws.row_dimensions[1].height = 30
+        # Set row height for header and title rows
+        ws.row_dimensions[1].height = 30  # Title row
+        ws.row_dimensions[2].height = 20  # Date row
+        ws.row_dimensions[4].height = 30  # Header row
         
         # Save the file
         wb.save(filename)

@@ -30,19 +30,12 @@ T5_TRACKER_KEY = os.getenv("T5_TRACKER_PATH")
 T7_TRACKER_KEY = os.getenv("T7_TRACKER_PATH")
 GREEN3_TRACKER_KEY = os.getenv("G3_TRACKER_PATH")
 
-# Green highlight RGB from tracker (Tower 6) used to count completed slabs
 GREEN_HEX = "FF92D050"
-
 MONTHS = ["June", "July", "August"]
 
-# Only these absolute row numbers in the final sheet should be bold (section title rows only)
-ROWS_TO_BOLD = {1, 5, 12, 19}
-
-# Tower 6 slab parsing config
 TOWER6_ROWS = [4, 5, 6, 7, 9, 10, 14, 15, 16, 17, 19, 20]
 TOWER6_COLS = ['FK', 'FM', 'FO', 'FQ', 'FS', 'FU', 'FW', 'FY', 'GA', 'GC', 'GE', 'GG', 'GI', 'GK']
 
-# Tower 5 & 7 fixed KRA cells
 T5_TARGET_CELLS = {
     "Installation of Rear & Front balcony UPVC Windows": {"June": ("D23", "Flats"), "July": ("E23", "Flats"), "August": ("F23", "Flats")},
     "EL-Second Fix": {"June": ("D24", "Flats"), "July": ("E24", "Flats"), "August": ("F24", "Flats")},
@@ -60,10 +53,6 @@ T7_TARGET_CELLS = {
 T5_ACTIVITIES = list(T5_TARGET_CELLS.keys())
 T7_ACTIVITIES = list(T7_TARGET_CELLS.keys())
 
-# -----------------------------------------------------------------------------
-# COS HELPERS
-# -----------------------------------------------------------------------------
-
 def init_cos():
     return ibm_boto3.client(
         "s3",
@@ -77,12 +66,7 @@ def download_file_bytes(cos, key):
     obj = cos.get_object(Bucket=BUCKET, Key=key)
     return obj["Body"].read()
 
-# -----------------------------------------------------------------------------
-# UTILITIES
-# -----------------------------------------------------------------------------
-
 def extract_number(cell_value):
-    """Return first integer found; treat '-' or empty as 0."""
     if not cell_value or cell_value == "-":
         return 0.0
     match = re.search(r"(\d+)", str(cell_value))
@@ -91,12 +75,7 @@ def extract_number(cell_value):
 def get_previous_months():
     now = datetime.now()
     current_month = now.month
-    month_map = {"June": 6, "July": 7, "August": 8}
-    return [m for m in MONTHS if month_map[m] < current_month]
-
-# -----------------------------------------------------------------------------
-# TOWER 6
-# -----------------------------------------------------------------------------
+    return ["June"] if 6 < current_month else []
 
 def get_slab_targets_fixed_cells(cos):
     raw = download_file_bytes(cos, KRA_KEY)
@@ -107,12 +86,12 @@ def get_slab_targets_fixed_cells(cos):
         "July": extract_number(sheet["C18"].value),
         "August": extract_number(sheet["D18"].value),
     }
-    logger.info(f"Slab targets (T6): {targets}")
     return targets
 
 def count_tower6_completed(wb):
     counts = {m: 0 for m in MONTHS}
     sheet = wb["Revised baseline with 60d NGT"]
+    
     for row in TOWER6_ROWS:
         for col in TOWER6_COLS:
             cell = sheet[f"{col}{row}"]
@@ -127,55 +106,56 @@ def count_tower6_completed(wb):
                     continue
             if cell_date:
                 month_name = cell_date.strftime("%B")
-                if month_name in MONTHS:
+                if month_name == "June":
                     fill = cell.fill
                     if fill.fill_type == "solid" and fill.start_color:
                         if fill.start_color.rgb == GREEN_HEX:
                             counts[month_name] += 1
-    logger.info(f"Completed slabs by month (T6): {counts}")
+    
     return counts
 
 def build_t6_milestone_dataframe(targets, completed):
-    """Build single-row DF for Tower 6 with correct weighted value.
-    Weighted Delay against Targets = (% work done till last reported month * Weightage)/100
-    """
     prev_months = get_previous_months()
-    cum_done = 0
-    cum_target = 0
-    month_pct = {}
-
     total_milestones = 1
     weightage = round(100 / total_milestones, 2) if total_milestones else 0
 
-    rows_tmp = []
-    for m in MONTHS:
-        done   = completed.get(m, 0) if m in prev_months else 0
-        target = targets.get(m, 0)
-        cum_done   += done
-        cum_target += target
-        pct_done = round((cum_done / cum_target) * 100, 2) if cum_target > 0 else 0
-        pct_done = min(pct_done, 100)
-        month_pct[m] = pct_done if m in prev_months else 0
+    def pct(m):
+        if m == "June" and m in prev_months:
+            done = completed.get(m, 0)
+            target = targets.get(m, 0)
+            if target == 0:
+                return "0.0%"
+            pct_done = min(round((done / target) * 100, 2), 100)
+            return f"{pct_done}%"
+        else:
+            return ""
 
-        rows_tmp.append({
-            "Milestone": "Milestone-01",
-            "Activity": "Slab Casting",
-            "Target Till August": f"{int(sum(targets.values()))} Slabs ({int(targets['June'])} Slabs-June, {int(targets['July'])} slabs-July & {int(targets['August'])} slabs-August)",
-            f"% Work Done against Target-Till {m}": f"{pct_done}%" if m in prev_months else "",
-            "Weightage": weightage,
-            # placeholder; we'll fill it in the final DF
-            "Weighted Delay against Targets": "",
-            f"Target achieved in {m}": f"{done} slab cast out of {int(target)} planned" if target > 0 and m in prev_months else "",
-            "Total achieved": "",
-            "Delay Reasons_June 2025": "",
-        })
+    target_text = f"{int(sum(targets.values()))} Slabs ({int(targets['June'])} Slabs-June, {int(targets['July'])} slabs-July & {int(targets['August'])} slabs-August)"
 
-    # decide which month to use for weighted delay (last month we have data for)
-    if prev_months:
-        last_m = prev_months[-1]
-        weighted_delay_val = round((month_pct[last_m] * weightage) / 100, 2)
-    else:
-        weighted_delay_val = None
+    row = {
+        "Milestone": "Milestone-01",
+        "Activity": "Slab Casting",
+        "Target Till August": target_text,
+        "% Work Done against Target-Till June": pct("June"),
+        "% Work Done against Target-Till July": pct("July"),
+        "% Work Done against Target-Till August": pct("August"),
+        "Weightage": weightage,
+        "Weighted Delay against Targets": "",
+        "Target achieved in June": f"{completed.get('June', 0)} slab cast out of {int(targets['June'])} planned" if "June" in prev_months else "",
+        "Target achieved in July": "",
+        "Target achieved in August": "",
+        "Total achieved": "",
+        "Delay Reasons_June 2025": "",
+    }
+
+    if "June" in prev_months:
+        try:
+            june_pct_str = pct("June").replace("%", "")
+            if june_pct_str:
+                june_pct_val = float(june_pct_str)
+                row["Weighted Delay against Targets"] = f"{round((june_pct_val * weightage) / 100, 2)}%"
+        except Exception:
+            pass
 
     all_cols = ["Milestone", "Activity", "Target Till August",
                 "% Work Done against Target-Till June",
@@ -185,92 +165,98 @@ def build_t6_milestone_dataframe(targets, completed):
                 "Target achieved in June", "Target achieved in July", "Target achieved in August",
                 "Total achieved", "Delay Reasons_June 2025"]
 
-    for col in all_cols:
-        for r in rows_tmp:
-            r.setdefault(col, "")
-
     final_df = pd.DataFrame(columns=all_cols)
-    final_df.loc[0] = {
-        "Milestone": "Milestone-01",
-        "Activity": "Slab Casting",
-        "Target Till August": rows_tmp[0]["Target Till August"],
-        "% Work Done against Target-Till June": rows_tmp[0]["% Work Done against Target-Till June"],
-        "% Work Done against Target-Till July": rows_tmp[1]["% Work Done against Target-Till July"],
-        "% Work Done against Target-Till August": rows_tmp[2]["% Work Done against Target-Till August"],
-        "Weightage": weightage,
-        "Weighted Delay against Targets": f"{weighted_delay_val}%" if weighted_delay_val is not None else "",
-        "Target achieved in June": rows_tmp[0]["Target achieved in June"],
-        "Target achieved in July": rows_tmp[1]["Target achieved in July"],
-        "Target achieved in August": rows_tmp[2]["Target achieved in August"],
-        "Total achieved": "",
-        "Delay Reasons_June 2025": "",
-    }
+    final_df.loc[0] = row
     return final_df
 
-# -----------------------------------------------------------------------------
-# TOWER 5 - UPDATED FOR MODULE-WISE COUNTING
-# -----------------------------------------------------------------------------
-
 def count_completed_activities_by_module_and_month(wb, sheet_name, activity_mapping):
-    """
-    Count completed activities module-wise from the tracker workbook.
-    Returns a dictionary with structure: {activity: {month: count}}
-    """
     sheet = wb[sheet_name]
     activity_counts = {}
     
-    # Initialize counts for all activities and months
     for activity in activity_mapping.keys():
         activity_counts[activity] = {month: 0 for month in MONTHS}
     
-    # Find the header row to locate the "Actual Finish" column
     actual_finish_col = None
-    for row in sheet.iter_rows(min_row=1, max_row=10):  # Check first 10 rows for headers
+    activity_name_col = None
+    
+    # Find the columns for Actual Finish and Activity
+    for row in sheet.iter_rows(min_row=1, max_row=10):
         for cell in row:
-            if cell.value and "Actual Finish" in str(cell.value):
-                actual_finish_col = cell.column
-                break
+            if cell.value:
+                if "Actual Finish" in str(cell.value):
+                    actual_finish_col = cell.column
+                if "Activity" in str(cell.value) or "Task" in str(cell.value):
+                    activity_name_col = cell.column
         if actual_finish_col:
             break
     
     if not actual_finish_col:
-        logger.warning(f"Could not find 'Actual Finish' column in {sheet_name}")
         return activity_counts
     
-    logger.info(f"Found 'Actual Finish' column at column {actual_finish_col} in {sheet_name}")
+    if not activity_name_col:
+        activity_name_col = 6
     
-    # Iterate through all data rows
-    for row in sheet.iter_rows(min_row=2):  # Start from row 2 to skip headers
+    # Add debug logging to see what's being processed
+    logger.info(f"Processing sheet: {sheet_name}")
+    el_first_fix_found = 0  # Counter for debugging
+    
+    for row_idx, row in enumerate(sheet.iter_rows(min_row=2), start=2):
         try:
-            # Get the activity name (assuming it's in column F, index 5)
-            activity_cell = row[5] if len(row) > 5 else None
+            activity_cell = row[activity_name_col - 1] if len(row) >= activity_name_col else None
             if not activity_cell or not activity_cell.value:
                 continue
                 
             activity_name = str(activity_cell.value).strip()
-            
-            # Map the activity name to our standard names
             mapped_activity = None
+            
+            # IMPROVED: Check all activities in the mapping systematically
             for standard_name, variations in activity_mapping.items():
-                if activity_name in variations or activity_name.lower() in [v.lower() for v in variations]:
-                    mapped_activity = standard_name
-                    break
+                if standard_name == "El- First Fix":
+                    # Special comprehensive check for El- First Fix
+                    activity_lower = activity_name.lower().strip()
+                    if (activity_name == "EL-First Fix" or  # Most common in tracker
+                        activity_name == "El- First Fix" or
+                        activity_name == "EL- First Fix" or
+                        activity_name == "EL First Fix" or
+                        activity_name == "El-First Fix" or
+                        activity_name == "Electrical First Fix" or
+                        activity_lower == "el-first fix" or
+                        activity_lower == "el- first fix" or
+                        activity_lower == "el first fix"):
+                        mapped_activity = standard_name
+                        el_first_fix_found += 1
+                        logger.info(f"  Found EL-First Fix variant: '{activity_name}' at row {row_idx}")
+                        break
+                        
+                elif standard_name == "Installation of Rear & Front balcony UPVC Windows":
+                    # Special handling for UPVC Windows
+                    if (activity_name == standard_name or 
+                        activity_name == "Installation of Rear &amp; Front balcony UPVC Windows" or
+                        activity_name == "Installation of Rear and Front balcony UPVC Windows" or
+                        activity_name == "Installation of Rear & Front Balcony UPVC Windows" or
+                        activity_name == "Installation of rear & front balcony UPVC Windows"):
+                        mapped_activity = standard_name
+                        break
+                        
+                else:
+                    # General mapping for other activities
+                    if activity_name in variations or activity_name.lower() in [v.lower() for v in variations]:
+                        mapped_activity = standard_name
+                        break
             
             if not mapped_activity:
                 continue
             
-            # Get the actual finish date (column L is index 11, but we found the actual column)
+            # Check actual finish date
             actual_finish_cell = row[actual_finish_col - 1] if len(row) >= actual_finish_col else None
             if not actual_finish_cell or not actual_finish_cell.value:
                 continue
             
-            # Parse the date
             actual_finish_date = None
             if isinstance(actual_finish_cell.value, datetime):
                 actual_finish_date = actual_finish_cell.value
             elif isinstance(actual_finish_cell.value, str):
                 try:
-                    # Try different date formats
                     for date_format in ["%Y-%m-%d", "%d-%m-%Y", "%m/%d/%Y", "%d/%m/%Y"]:
                         try:
                             actual_finish_date = datetime.strptime(actual_finish_cell.value, date_format)
@@ -282,15 +268,19 @@ def count_completed_activities_by_module_and_month(wb, sheet_name, activity_mapp
             
             if actual_finish_date:
                 month_name = actual_finish_date.strftime("%B")
-                if month_name in MONTHS:
+                if month_name == "June":
                     activity_counts[mapped_activity][month_name] += 1
-                    logger.debug(f"Counted {mapped_activity} completed in {month_name}")
+                    if mapped_activity == "El- First Fix":
+                        logger.info(f"  Counted EL-First Fix for June: '{activity_name}' on {actual_finish_date.strftime('%Y-%m-%d')}")
                     
         except Exception as e:
-            logger.debug(f"Error processing row in {sheet_name}: {e}")
+            logger.warning(f"Error processing row {row_idx} in sheet {sheet_name}: {e}")
             continue
     
-    logger.info(f"Activity counts for {sheet_name}: {activity_counts}")
+    # Debug logging for El- First Fix specifically
+    if "El- First Fix" in activity_counts:
+        logger.info(f"Sheet {sheet_name}: Found {el_first_fix_found} EL-First Fix entries, {activity_counts['El- First Fix']['June']} completed in June")
+    
     return activity_counts
 
 def get_t5_targets_and_progress(cos):
@@ -305,17 +295,15 @@ def get_t5_targets_and_progress(cos):
             cell, unit = T5_TARGET_CELLS[activity][month]
             val = extract_number(sheet_kra[cell].value)
             t5_targets[activity][month] = (val, unit)
-    logger.info(f"Tower 5 targets: {t5_targets}")
 
     raw_tracker = download_file_bytes(cos, T5_TRACKER_KEY)
     wb_tracker = load_workbook(filename=BytesIO(raw_tracker), data_only=True)
 
-    # Define activity name mapping for Tower 5
     t5_activity_mapping = {
         "Installation of Rear & Front balcony UPVC Windows": [
             "Installation of Rear & Front balcony UPVC Windows",
-            "UPVC Windows",
-            "Balcony UPVC Windows"
+            "Installation of Rear &amp; Front balcony UPVC Windows",
+            "Installation of Rear and Front balcony UPVC Windows"
         ],
         "EL-Second Fix": [
             "EL-Second Fix",
@@ -336,14 +324,33 @@ def get_t5_targets_and_progress(cos):
         ]
     }
 
-    # Count completed activities module-wise
-    activity_counts = count_completed_activities_by_module_and_month(
-        wb_tracker, "TOWER 5 FINISHING.", t5_activity_mapping
-    )
+    required_t5_sheets = ["M7 T5", "M6 T5", "M5 T5", "M4 T5", "M3 T5", "M2 T5"]
+    t5_sheet_names = []
+    available_sheets = wb_tracker.sheetnames
+    
+    for required_sheet in required_t5_sheets:
+        if required_sheet in available_sheets:
+            t5_sheet_names.append(required_sheet)
+    
+    if not t5_sheet_names:
+        activity_counts = {}
+        for activity in T5_ACTIVITIES:
+            activity_counts[activity] = {month: 0 for month in MONTHS}
+    else:
+        activity_counts = {}
+        for activity in T5_ACTIVITIES:
+            activity_counts[activity] = {month: 0 for month in MONTHS}
+
+        for sheet_name in t5_sheet_names:
+            sheet_counts = count_completed_activities_by_module_and_month(
+                wb_tracker, sheet_name, t5_activity_mapping
+            )
+            
+            for activity in T5_ACTIVITIES:
+                for month in MONTHS:
+                    activity_counts[activity][month] += sheet_counts[activity][month]
 
     prev_months = get_previous_months()
-    month_indices = {m: i for i, m in enumerate(MONTHS)}
-
     progress_data = []
     total_milestones = len(T5_ACTIVITIES)
     weightage = round(100 / total_milestones, 2) if total_milestones else 0
@@ -359,17 +366,10 @@ def get_t5_targets_and_progress(cos):
         }
         
         for m in MONTHS:
-            if m in prev_months:
-                months_to_count = MONTHS[: month_indices[m] + 1]
-                count_cumulative = sum(activity_counts[activity][month] for month in months_to_count)
+            if m == "June" and m in prev_months:
+                count_cumulative = activity_counts[activity]["June"]
+                target_cumulative, unit = t5_targets[activity]["June"]
 
-                target_cumulative, unit = 0, ""
-                for month in months_to_count:
-                    val, u = t5_targets[activity][month]
-                    target_cumulative += val
-                    unit = u
-
-                # if target is '-' (0) treat as 100%
                 if target_cumulative == 0:
                     pct_done = 100.0
                 else:
@@ -377,15 +377,12 @@ def get_t5_targets_and_progress(cos):
 
                 row[f"% Work Done against Target-Till {m}"] = f"{pct_done}%"
                 
-                # Get individual month target for display
                 month_target, month_unit = t5_targets[activity][m]
-                # For achieved count, we want to show only what was achieved in that specific month
                 count_in_month = activity_counts[activity][m]
                 
                 if month_target == 0:
-                    # Show which future months it's planned for
                     future_months = []
-                    for future_m in MONTHS[month_indices[m] + 1:]:
+                    for future_m in MONTHS[1:]:
                         future_target, _ = t5_targets[activity][future_m]
                         if future_target > 0:
                             future_months.append(future_m)
@@ -429,10 +426,6 @@ def get_t5_targets_and_progress(cos):
     df_t5 = pd.DataFrame(progress_data, columns=all_cols)
     return df_t5
 
-# -----------------------------------------------------------------------------
-# TOWER 7 - UPDATED FOR MODULE-WISE COUNTING
-# -----------------------------------------------------------------------------
-
 def get_t7_targets_and_progress(cos):
     raw = download_file_bytes(cos, KRA_KEY)
     wb_kra = load_workbook(filename=BytesIO(raw), data_only=True)
@@ -445,46 +438,113 @@ def get_t7_targets_and_progress(cos):
             cell, unit = T7_TARGET_CELLS[activity][month]
             val = extract_number(sheet_kra[cell].value)
             t7_targets[activity][month] = (val, unit)
-    logger.info(f"Tower 7 targets: {t7_targets}")
 
     raw_tracker = download_file_bytes(cos, T7_TRACKER_KEY)
     wb_tracker = load_workbook(filename=BytesIO(raw_tracker), data_only=True)
 
-    # Define activity name mapping for Tower 7
+    # DEBUGGING: Check what sheets are actually available
+    available_sheets = wb_tracker.sheetnames
+    logger.info(f"=== T7 TRACKER SHEET DEBUGGING ===")
+    logger.info(f"All available sheets in T7 tracker: {available_sheets}")
+    
+    # Check for M1 specifically and any variations
+    m1_variations = [sheet for sheet in available_sheets if 'M1' in sheet.upper()]
+    logger.info(f"M1 sheet variations found: {m1_variations}")
+    
+    # Check for any other T7 sheets we might be missing
+    t7_sheets_found = [sheet for sheet in available_sheets if 'T7' in sheet.upper()]
+    logger.info(f"All T7 sheets found: {t7_sheets_found}")
+
+    # UPDATED: More comprehensive activity mapping with exact tracker names
     t7_activity_mapping = {
         "El- First Fix": [
+            "EL-First Fix",  # This is the actual name in tracker - MOST IMPORTANT
             "El- First Fix",
-            "EL- First Fix",
+            "EL- First Fix", 
             "EL First Fix",
+            "El-First Fix",
             "Electrical First Fix",
-            "El-First Fix"
+            "el-first fix",
+            "el- first fix"
         ],
         "Floor Tiling": [
             "Floor Tiling",
             "Flooring Tiling",
-            "Tile Flooring"
+            "Tile Flooring",
+            "floor tiling"
         ],
         "False Ceiling Framing": [
             "False Ceiling Framing",
             "Ceiling Framing",
-            "False Ceiling Frame"
+            "False Ceiling Frame",
+            "false ceiling framing"
         ],
         "C-Stone flooring": [
             "C-Stone flooring",
             "C Stone flooring",
             "C-Stone Flooring",
-            "CStone flooring"
+            "CStone flooring",
+            "c-stone flooring"
         ]
     }
 
-    # Count completed activities module-wise
-    activity_counts = count_completed_activities_by_module_and_month(
-        wb_tracker, "TOWER 7 FINISHING.", t7_activity_mapping
-    )
+    # UPDATED: Use the actual available T7 sheets instead of hardcoded list
+    required_t7_sheets = ["M7 T7", "M6 T7", "M5 T7", "M4 T7", "M3 T7", "M2 T7", "M1 T7"]
+    
+    # Find all actual T7 sheets available (in case naming is different)
+    actual_t7_sheets = []
+    for sheet_name in available_sheets:
+        # Check for any sheet that contains both a module identifier (M1-M7) and T7
+        if any(module in sheet_name.upper() for module in ['M1', 'M2', 'M3', 'M4', 'M5', 'M6', 'M7']):
+            if 'T7' in sheet_name.upper():
+                actual_t7_sheets.append(sheet_name)
+    
+    logger.info(f"Required T7 sheets: {required_t7_sheets}")
+    logger.info(f"Actual T7 sheets found: {actual_t7_sheets}")
+    
+    # Use actual sheets instead of just the required ones
+    t7_sheet_names = actual_t7_sheets if actual_t7_sheets else []
+    
+    # Also check the original method for comparison
+    original_method_sheets = []
+    for required_sheet in required_t7_sheets:
+        if required_sheet in available_sheets:
+            original_method_sheets.append(required_sheet)
+    
+    logger.info(f"Original method would find: {original_method_sheets}")
+    logger.info(f"Using sheets: {t7_sheet_names}")
+    
+    if not t7_sheet_names:
+        activity_counts = {}
+        for activity in T7_ACTIVITIES:
+            activity_counts[activity] = {month: 0 for month in MONTHS}
+    else:
+        activity_counts = {}
+        for activity in T7_ACTIVITIES:
+            activity_counts[activity] = {month: 0 for month in MONTHS}
 
+        for sheet_name in t7_sheet_names:
+            sheet_counts = count_completed_activities_by_module_and_month(
+                wb_tracker, sheet_name, t7_activity_mapping
+            )
+            
+            for activity in T7_ACTIVITIES:
+                for month in MONTHS:
+                    activity_counts[activity][month] += sheet_counts[activity][month]
+
+    # Enhanced debug logging
+    logger.info(f"=== FINAL T7 RESULTS ===")
+    logger.info(f"Sheets processed: {t7_sheet_names}")
+    logger.info(f"T7 Activity counts for June: {[(act, activity_counts[act]['June']) for act in T7_ACTIVITIES]}")
+    total_el_first_fix = activity_counts.get('El- First Fix', {}).get('June', 0)
+    logger.info(f"TOTAL EL-FIRST FIX COUNT: {total_el_first_fix}")
+    
+    # Check if we're missing M1 T7 specifically
+    if "M1 T7" not in t7_sheet_names:
+        logger.warning("⚠️  M1 T7 sheet is MISSING from processing!")
+        logger.warning("This could explain the difference between expected (110) and actual (94) counts")
+    
     prev_months = get_previous_months()
-    month_indices = {m: i for i, m in enumerate(MONTHS)}
-
     progress_data = []
     total_milestones = len(T7_ACTIVITIES)
     weightage = round(100 / total_milestones, 2) if total_milestones else 0
@@ -500,15 +560,9 @@ def get_t7_targets_and_progress(cos):
         }
         
         for m in MONTHS:
-            if m in prev_months:
-                months_to_count = MONTHS[: month_indices[m] + 1]
-                count_cumulative = sum(activity_counts[activity][month] for month in months_to_count)
-
-                target_cumulative, unit = 0, ""
-                for month in months_to_count:
-                    val, u = t7_targets[activity][month]
-                    target_cumulative += val
-                    unit = u
+            if m == "June" and m in prev_months:
+                count_cumulative = activity_counts[activity]["June"]
+                target_cumulative, unit = t7_targets[activity]["June"]
 
                 if target_cumulative == 0:
                     pct_done = 100.0
@@ -517,15 +571,12 @@ def get_t7_targets_and_progress(cos):
 
                 row[f"% Work Done against Target-Till {m}"] = f"{pct_done}%"
                 
-                # Get individual month target for display
                 month_target, month_unit = t7_targets[activity][m]
-                # For achieved count, we want to show only what was achieved in that specific month
                 count_in_month = activity_counts[activity][m]
                 
                 if month_target == 0:
-                    # Show which future months it's planned for
                     future_months = []
-                    for future_m in MONTHS[month_indices[m] + 1:]:
+                    for future_m in MONTHS[1:]:
                         future_target, _ = t7_targets[activity][future_m]
                         if future_target > 0:
                             future_months.append(future_m)
@@ -553,10 +604,10 @@ def get_t7_targets_and_progress(cos):
 
         total_target = sum(t7_targets[activity][month][0] for month in MONTHS)
         unit = t7_targets[activity][MONTHS[0]][1] if total_target > 0 else ""
-        row["Target Till August"] = (
-            f"{int(total_target)} {unit} ({int(t7_targets[activity]['June'][0])} {unit}-June, "
-            f"{int(t7_targets[activity]['July'][0])} {unit}-July & {int(t7_targets[activity]['August'][0])} {unit}-August)"
-        )
+        june_target = int(t7_targets[activity]['June'][0])
+        july_target = int(t7_targets[activity]['July'][0])
+        august_target = int(t7_targets[activity]['August'][0])
+        row["Target Till August"] = f"{int(total_target)} {unit} ({june_target} {unit}-June, {july_target} {unit}-July & {august_target} {unit}-August)"
         progress_data.append(row)
 
     all_cols = ["Milestone", "Activity", "Target Till August",
@@ -569,101 +620,244 @@ def get_t7_targets_and_progress(cos):
     df_t7 = pd.DataFrame(progress_data, columns=all_cols)
     return df_t7
 
-# -----------------------------------------------------------------------------
-# GREEN 3 (External Development)
-# -----------------------------------------------------------------------------
-
 def get_green3_targets_and_progress(cos):
     logger.info("Calculating Green 3 External Development Work progress...")
     raw = download_file_bytes(cos, GREEN3_TRACKER_KEY)
     wb = load_workbook(filename=BytesIO(raw), data_only=True)
+    
+    # Try to find the correct sheet - check available sheet names
+    sheet_names = wb.sheetnames
+    logger.info(f"Available sheets in Green 3 tracker: {sheet_names}")
+    
+    # Use the first sheet or try to find a specific one
     sheet = wb.active
+    if len(sheet_names) > 1:
+        # Look for sheets that might contain the progress data
+        for name in sheet_names:
+            if any(keyword in name.lower() for keyword in ['progress', 'track', 'work', 'green']):
+                sheet = wb[name]
+                logger.info(f"Using sheet: {name}")
+                break
 
-    # Only show June milestone as per your latest requirement
-    green3_activities = [
-        "Pathway Area & Planter",  # Milestone-01
-        # (Removed milestones 02 & 03 because only June tracker is required)
-    ]
-
-    tracker_name_map = {
-        "Pathway Area & Planter": "Pathway Area & Planter",
+    # Define activities dynamically parsed from targets - this should come from your KRA or config
+    # For now, keeping the structure but making it more flexible
+    green3_activities = {
+        "June": [
+            {
+                "parent": "Path Way Area", 
+                "activity": "GSB", 
+                "target": "100%"
+            },
+        ],
+        "July": [
+            {
+                "parent": "Water Proofing - Water Body & Gazebo", 
+                "activity": "Water Proofing", 
+                "target": "100%"
+            },
+        ],
+        "August": [
+            {
+                "parent": "Stone Work -Water Body & Gazebo", 
+                "activity": "Stone Work", 
+                "target": "100%"
+            },
+        ]
     }
+
+    def find_parent_activity_row(sheet, parent_activity_name):
+        """Find the row containing the bold parent activity with flexible matching"""
+        logger.info(f"=== Looking for BOLD parent activity: '{parent_activity_name}' ===")
+        
+        # Define variations for parent activity names
+        parent_variations = {
+            "Path Way Area": ["pathway area", "path way area", "pathway area & planter", "path way area & planter"],
+            "Water Proofing - Water Body & Gazebo": ["water proofing", "waterproofing", "water body", "gazebo", "water proofing - water body & gazebo"],
+            "Stone Work -Water Body & Gazebo": ["stone work", "stonework", "water body", "gazebo", "stone work -water body & gazebo", "stone work - water body & gazebo"]
+        }
+        
+        # Get variations for this parent activity
+        search_terms = parent_variations.get(parent_activity_name, [parent_activity_name.lower()])
+        search_terms.append(parent_activity_name.lower())  # Always include the original
+        
+        logger.info(f"Searching for variations: {search_terms}")
+        
+        for row_idx in range(1, sheet.max_row + 1):
+            for col_idx in range(1, min(sheet.max_column + 1, 10)):  # Check first 10 columns
+                cell = sheet.cell(row=row_idx, column=col_idx)
+                
+                if cell.value and cell.font and cell.font.bold:
+                    cell_text = str(cell.value).strip().lower()
+                    logger.info(f"Found BOLD text at row {row_idx}, col {col_idx}: '{cell.value}'")
+                    
+                    # Check if this bold cell matches any of our search terms
+                    for search_term in search_terms:
+                        if search_term in cell_text or cell_text in search_term:
+                            logger.info(f"MATCH! Found parent activity '{parent_activity_name}' (matched with '{search_term}') at row {row_idx}")
+                            return row_idx, col_idx
+        
+        logger.warning(f"Could not find BOLD parent activity: '{parent_activity_name}' with any variations")
+        return None, None
+
+    def find_sub_activity_percentage(sheet, parent_row, parent_col, sub_activity_name, max_search_rows=20):
+        """Find the sub-activity below the parent and get its %Complete from column L"""
+        logger.info(f"=== Looking for sub-activity '{sub_activity_name}' below row {parent_row} ===")
+        
+        # From the image, %Complete is in column L (column 12)
+        percent_complete_col = 12  # Column L
+        
+        # Search in rows below the parent activity
+        for search_row in range(parent_row + 1, min(parent_row + max_search_rows + 1, sheet.max_row + 1)):
+            # Check column C (Activity column) which is column 3 based on the image
+            activity_col = 3
+            
+            try:
+                cell = sheet.cell(row=search_row, column=activity_col)
+                if cell.value:
+                    cell_text = str(cell.value).strip()
+                    logger.info(f"Checking row {search_row}, activity: '{cell_text}'")
+                    
+                    # Check if this cell contains our sub-activity (exact or partial match)
+                    if (sub_activity_name.lower() in cell_text.lower() or 
+                        cell_text.lower() in sub_activity_name.lower() or
+                        sub_activity_name.lower() == cell_text.lower()):
+                        
+                        logger.info(f"Found sub-activity '{sub_activity_name}' at row {search_row}: '{cell_text}'")
+                        
+                        # Get %Complete from column L (column 12)
+                        pct_cell = sheet.cell(row=search_row, column=percent_complete_col)
+                        
+                        if pct_cell.value is not None:
+                            try:
+                                val = pct_cell.value
+                                logger.info(f"Raw %Complete value for '{sub_activity_name}': {val} (type: {type(val)})")
+                                
+                                if isinstance(val, str):
+                                    # Remove % sign if present and convert
+                                    val = val.replace('%', '').strip()
+                                    val = float(val)
+                                elif isinstance(val, (int, float)):
+                                    val = float(val)
+                                
+                                # Convert to percentage if it's a decimal (0-1 range)
+                                if 0 <= val <= 1:
+                                    val = val * 100
+                                
+                                # Validate percentage range
+                                if 0 <= val <= 100:
+                                    logger.info(f"SUCCESS! Found %Complete for '{sub_activity_name}': {val}% at row {search_row}")
+                                    return round(val, 2)
+                                else:
+                                    logger.warning(f"Percentage value {val} is outside valid range (0-100)")
+                                    
+                            except (ValueError, TypeError) as e:
+                                logger.warning(f"Could not parse percentage value '{pct_cell.value}': {e}")
+                        else:
+                            logger.warning(f"Found sub-activity '{sub_activity_name}' but %Complete cell is empty")
+                        
+                        # Found the activity but couldn't get percentage, try next occurrence
+                        continue
+                            
+            except Exception as e:
+                logger.debug(f"Error checking cell at row {search_row}: {e}")
+                continue
+        
+        logger.warning(f"Could not find sub-activity '{sub_activity_name}' below parent row {parent_row}")
+        return 0
 
     progress_data = []
     prev_months = get_previous_months()
 
-    for i, act in enumerate(green3_activities):
-        row = {
-            "Milestone": f"Milestone-{i+1:02d}",
-            "Activity": act,
-            "Target": "100% in June" if act == "Pathway Area & Planter" else "Pending",
-            "% Work Done against Target-Till June": "",
-            "% Work Done against Target-Till July": "",
-            "% Work Done against Target-Till August": "",
-            "Weightage": 100,
-            "Weighted Delay against Targets": "",
-            "Target achieved in June": "",
-            "Target achieved in July": "",
-            "Target achieved in August": "",
-            "Total achieved": "",
-            "Delay Reasons_June 2025": "",
-        }
+    # Debug: Print out sheet structure to understand the layout
+    logger.info("=== DEBUGGING Green 3 Sheet Structure ===")
+    logger.info(f"Sheet max row: {sheet.max_row}, max column: {sheet.max_column}")
+    
+    # Print first few rows to understand structure and find headers
+    for i in range(1, min(11, sheet.max_row + 1)):
+        row_data = []
+        for j in range(1, min(20, sheet.max_column + 1)):  # Check more columns for headers
+            cell = sheet.cell(row=i, column=j)
+            value = str(cell.value) if cell.value is not None else ""
+            is_bold = cell.font and cell.font.bold
+            row_data.append(f"{get_column_letter(j)}{i}:{value}{'(B)' if is_bold else ''}")
+        logger.info(f"Row {i}: {row_data}")
 
-        tracker_activity_name = tracker_name_map[act]
-        found_percent = None
-        for sheet_row in sheet.iter_rows(min_row=2, values_only=False):
-            cell_val = sheet_row[2].value
-            if cell_val and tracker_activity_name.lower() in str(cell_val).lower():
-                percent_cell = sheet_row[11]
-                if percent_cell.value is not None:
-                    val = percent_cell.value
-                    if isinstance(val, float) and val <= 1.0:
-                        val = val * 100
-                    found_percent = round(val, 2)
-                break
+    # Process each month's activities
+    for month in MONTHS:
+        activities_for_month = green3_activities.get(month, [])
+        
+        for i, act in enumerate(activities_for_month):
+            row = {
+                "Milestone": f"Milestone-{i+1:02d}",
+                "Activity": f"{act['parent']}-{act['activity']}",
+                # CHANGE: Use "Target" instead of "Target Till August" for Green 3
+                "Target": f"{act['target']} in {month}",
+                "% Work Done against Target-Till June": "",
+                "% Work Done against Target-Till July": "",
+                "% Work Done against Target-Till August": "",
+                "Weightage": 100,
+                "Weighted Delay against Targets": "",
+                "Target achieved in June": "",
+                "Target achieved in July": "",
+                "Target achieved in August": "",
+                "Total achieved": "",
+                "Delay Reasons_June 2025": "",
+            }
 
-        for m in MONTHS:
-            if m in prev_months:
-                if m == "June":
-                    row[f"% Work Done against Target-Till {m}"] = f"{found_percent}%" if found_percent is not None else ""
+            found_percent = 0
+            
+            # CHANGE: Only process June activities for now, leave July and August blank
+            if month == "June" and month in prev_months:
+                parent_activity = act['parent']
+                sub_activity = act['activity']
+                
+                logger.info(f"=== Processing {month}: {parent_activity} - {sub_activity} ===")
+                
+                # Step 1: Find the bold parent activity
+                parent_row, parent_col = find_parent_activity_row(sheet, parent_activity)
+                
+                if parent_row is not None:
+                    # Step 2: Find the sub-activity below the parent and get its percentage
+                    found_percent = find_sub_activity_percentage(sheet, parent_row, parent_col, sub_activity)
                 else:
-                    row[f"% Work Done against Target-Till {m}"] = ""
+                    logger.warning(f"Parent activity '{parent_activity}' not found, defaulting to 0%")
 
-        if "June" in prev_months:
-            try:
-                pct_june_val = found_percent if found_percent is not None else 0
-                row["Weighted Delay against Targets"] = f"{round((pct_june_val * 100) / 100, 2)}%"
-            except Exception:
-                row["Weighted Delay against Targets"] = ""
+                # Set the percentage for June only
+                row["% Work Done against Target-Till June"] = f"{found_percent}%"
+                row["Target achieved in June"] = f"{found_percent}% completed" if found_percent > 0 else "Not started"
+                
+                # Calculate weighted delay for June
+                try:
+                    row["Weighted Delay against Targets"] = f"{round((found_percent * 100) / 100, 2)}%"
+                except Exception:
+                    row["Weighted Delay against Targets"] = "0%"
 
-        progress_data.append(row)
+            progress_data.append(row)
 
-    all_cols = ["Milestone", "Activity", "Target",
+    # Create DataFrame with modified column name for Green 3
+    # CHANGE: Replace "Target Till August" with "Target" for Green 3
+    all_cols = ["Milestone", "Activity", "Target",  # Changed from "Target Till August"
                 "% Work Done against Target-Till June",
                 "% Work Done against Target-Till July",
                 "% Work Done against Target-Till August",
                 "Weightage", "Weighted Delay against Targets",
                 "Target achieved in June", "Target achieved in July", "Target achieved in August",
                 "Total achieved", "Delay Reasons_June 2025"]
+    
     df_green3 = pd.DataFrame(progress_data, columns=all_cols)
+    logger.info(f"Green 3 DataFrame created with {len(df_green3)} rows")
     return df_green3
-
-# -----------------------------------------------------------------------------
-# WRITER / STYLING - UPDATED WITH DATE DISPLAY
-# -----------------------------------------------------------------------------
 
 def write_excel_report(df_t6, df_t5, df_t7, df_green3, filename):
     wb = Workbook()
     ws = wb.active
     ws.title = "Time Delivery Milestones"
 
-    # Add title and date at the top
     current_date = datetime.now().strftime("%d-%m-%Y")
     ws.append(["Veridia Time Delivery Milestones Report"])
     ws.append([f"Report Generated on: {current_date}"])
-    ws.append([])  # Empty row for spacing
+    ws.append([])
 
-    # Define styles
     yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
     grey = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
     bold_font = Font(bold=True)
@@ -675,85 +869,78 @@ def write_excel_report(df_t6, df_t5, df_t7, df_green3, filename):
     thin = Side(style="thin", color="000000")
     border = Border(top=thin, bottom=thin, left=thin, right=thin)
 
-    # Get max columns for merging
     max_cols = max(len(df_t6.columns), len(df_t5.columns), len(df_t7.columns), len(df_green3.columns))
     
-    # Style title row (row 1)
     ws.merge_cells(f'A1:{get_column_letter(max_cols)}1')
     ws['A1'].font = title_font
     ws['A1'].alignment = center_align
     ws['A1'].fill = grey
     
-    # Style date row (row 2)
     ws.merge_cells(f'A2:{get_column_letter(max_cols)}2')
     ws['A2'].font = date_font
     ws['A2'].alignment = center_align
 
+    section_title_rows = set()
+    total_delay_rows = set()
+
     def append_df_block(title, df, total_delay_label):
-        """Write section title, dataframe and total delay row. Return (start_row, end_row)."""
         start_col = 1
         end_col = len(df.columns)
 
-        # Section title (merged row) - CHANGED TO GREY
         ws.append([title])
         title_row = ws.max_row
+        section_title_rows.add(title_row)
         ws.merge_cells(start_row=title_row, start_column=start_col,
                        end_row=title_row, end_column=end_col)
         for cell in ws[title_row]:
-            cell.fill = grey  # Changed from yellow to grey
+            cell.fill = grey
             cell.font = bold_font
             cell.alignment = center_align
             cell.border = border
 
-        # DataFrame rows
         for r in dataframe_to_rows(df, index=False, header=True):
             ws.append(r)
         header_row = title_row + 1
         body_start = header_row + 1
         body_end = ws.max_row
 
-        # Header styling - headers should ALWAYS be bold
         for cell in ws[header_row]:
             cell.font = bold_font
             cell.alignment = center_align
             cell.border = border
 
-        # Body styling - only bold if row number is in ROWS_TO_BOLD
         for r in range(body_start, body_end + 1):
             for cell in ws[r]:
-                cell.font = bold_font if r in ROWS_TO_BOLD else normal_font
+                cell.font = normal_font
                 cell.alignment = left_align if cell.col_idx in (1, 2) else center_align
                 cell.border = border
 
-        # Total delay row - FIXED TO APPEAR UNDER "Weighted Delay against Targets" COLUMN
         try:
             total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"] if v)
         except Exception:
             total_delay = 0
 
-        # Find the column index for "Weighted Delay against Targets"
         weighted_delay_col_idx = None
         for idx, col_name in enumerate(df.columns, start=1):
             if col_name == "Weighted Delay against Targets":
                 weighted_delay_col_idx = idx
                 break
 
-        # Create row with empty cells except for the total delay in the correct column
         total_row_data = [""] * end_col
         if weighted_delay_col_idx:
-            total_row_data[weighted_delay_col_idx - 1] = f"{round(total_delay, 2)}%"  # -1 because list is 0-indexed
-            total_row_data[0] = total_delay_label  # Put label in first column
+            total_row_data[weighted_delay_col_idx - 1] = f"{round(total_delay, 2)}%"
+            total_row_data[0] = total_delay_label
 
         ws.append(total_row_data)
         delay_row = ws.max_row
+        total_delay_rows.add(delay_row)
         
-        # Style the total delay row
         for idx, cell in enumerate(ws[delay_row], start=1):
             cell.font = bold_font
             cell.fill = yellow
-            if idx == 1:  # First column (label)
+            if idx == 1:
                 cell.alignment = left_align
-            elif idx == weighted_delay_col_idx:  # Weighted delay column
+            elif idx == weighted_delay_col_idx:
                 cell.alignment = center_align
             else:
                 cell.alignment = center_align
@@ -761,13 +948,11 @@ def write_excel_report(df_t6, df_t5, df_t7, df_green3, filename):
 
         return title_row, delay_row
 
-    # Write all sections without extra empty rows (after title, date, and empty row)
     append_df_block("Tower 6 Progress Against Milestones", df_t6, "Total Delay Tower 6")
     append_df_block("Tower 5 Progress Against Milestones", df_t5, "Total Delay Tower 5")
     append_df_block("Tower 7 Progress Against Milestones", df_t7, "Total Delay Tower 7")
     append_df_block("External Development (Green 3) Progress Against Milestones (Structure Work)", df_green3, "Total Delay ED")
 
-    # Column widths after wrapping
     for col in ws.columns:
         max_len = 0
         for cell in col:
@@ -775,44 +960,22 @@ def write_excel_report(df_t6, df_t5, df_t7, df_green3, filename):
             max_len = max(max_len, len(text.split("\n")[0]))
         ws.column_dimensions[get_column_letter(col[0].column)].width = min(max_len + 4, 60)
 
-    # Consistent row height
     for r in range(1, ws.max_row + 1):
         ws.row_dimensions[r].height = 22
 
     wb.save(filename)
-    logger.info(f"Report saved to {filename}")
-
-# -----------------------------------------------------------------------------
-# MAIN
-# -----------------------------------------------------------------------------
 
 def main():
     cos = init_cos()
-
-    logger.info("Fetching slab targets for Tower 6...")
     targets_t6 = get_slab_targets_fixed_cells(cos)
-
-    logger.info("Downloading Tower 6 tracker workbook...")
     raw_tracker_t6 = download_file_bytes(cos, T6_TRACKER_KEY)
     wb_tracker_t6 = load_workbook(filename=BytesIO(raw_tracker_t6), data_only=True)
-
-    logger.info("Counting completed slabs for Tower 6...")
     completed_t6 = count_tower6_completed(wb_tracker_t6)
-
-    logger.info("Building Tower 6 milestone DataFrame...")
     df_t6 = build_t6_milestone_dataframe(targets_t6, completed_t6)
-
-    logger.info("Calculating Tower 5 targets and progress...")
     df_t5 = get_t5_targets_and_progress(cos)
-
-    logger.info("Calculating Tower 7 targets and progress...")
     df_t7 = get_t7_targets_and_progress(cos)
-
-    logger.info("Calculating Green 3 External Development Work progress...")
     df_green3 = get_green3_targets_and_progress(cos)
-
     filename = f"Veridia_Time_Delivery_Milestone_Report ({datetime.now():%Y-%m-%d}).xlsx"
-    logger.info("Writing Excel report...")
     write_excel_report(df_t6, df_t5, df_t7, df_green3, filename)
 
 if __name__ == "__main__":

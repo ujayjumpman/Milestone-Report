@@ -30,7 +30,7 @@ ELIGO_TH_FINISHING_KEY = os.getenv("ELIGO_TH_TRACKER_PATH")
 ELIGO_KRA_KEY = os.getenv("KRA_PATH")
 
 GREEN_HEX = "FF92D050"
-MONTHS = ["June", "July", "August"]
+MONTHS = ["June", "July", "August"]  # Keep all months for column structure
 
 ROWS_TO_BOLD = {1, 5, 12, 19}
 TOWER_G_ANTICIPATED_COLS = ['N', 'R', 'V']
@@ -44,7 +44,7 @@ TOWER_G_ACTIVITIES = [
 ]
 
 TOWER_H_ACTIVITIES = [
-    "HVAC first fix",
+    "HVAC 1st Fix",
     "POP punning (Major area)",
     "Wall Tiling",
     "Floor Tiling"
@@ -79,10 +79,76 @@ def get_previous_months():
     now = datetime.now()
     current_month = now.month
     month_map = {"June": 6, "July": 7, "August": 8}
-    return [m for m in MONTHS if month_map[m] < current_month]
+    # Only return June as completed month for now
+    return ["June"] if 6 < current_month else []
+
+def count_green_dates_in_month_fixed(wb, sheet_name, columns, year, month, start_row=5, end_row=12):
+    """Count dates in green cells for specific rows (5-12) in Tower H structure"""
+    if sheet_name not in wb.sheetnames:
+        logger.warning(f"Sheet {sheet_name} not found in workbook")
+        return 0
+    sheet = wb[sheet_name]
+    count = 0
+
+    logger.info(f"Checking sheet {sheet_name} for month {month}/{year}")
+    logger.info(f"Columns: {columns}, Rows: {start_row}-{end_row}")
+    
+    for col_letter in columns:
+        logger.info(f"Processing column {col_letter}")
+        for row in range(start_row, end_row + 1):
+            cell = sheet[f"{col_letter}{row}"]
+            
+            # Log every cell we're checking
+            logger.info(f"Checking cell {col_letter}{row}: value={cell.value}")
+            
+            if cell.value:
+                try:
+                    cell_date = None
+                    if isinstance(cell.value, datetime):
+                        cell_date = cell.value
+                    elif isinstance(cell.value, str):
+                        # Try multiple date formats
+                        for date_format in ['%d-%m-%Y', '%d/%m/%Y', '%Y-%m-%d', '%m/%d/%Y']:
+                            try:
+                                cell_date = datetime.strptime(str(cell.value), date_format)
+                                break
+                            except:
+                                continue
+                        if not cell_date:
+                            cell_date = pd.to_datetime(cell.value, dayfirst=True, errors='coerce')
+                    
+                    logger.info(f"Cell {col_letter}{row}: parsed date={cell_date}")
+                    
+                    if pd.notna(cell_date) and cell_date.year == year and cell_date.month == month:
+                        fill = cell.fill
+                        color_code = getattr(fill, "start_color", None)
+                        rgb = color_code.rgb if color_code else None
+                        
+                        logger.info(f"Cell {col_letter}{row}: date matches {month}/{year}, fill_type={fill.fill_type}, rgb={rgb}")
+                        
+                        # Check for green color - try different possible green hex codes
+                        green_colors = [GREEN_HEX, "92D050", "FF92D050", "00FF92D050"]
+                        is_green = fill.fill_type == "solid" and rgb in green_colors
+                        
+                        if is_green:
+                            count += 1
+                            logger.info(f"✓ Found GREEN date in {col_letter}{row}: {cell_date}")
+                        else:
+                            logger.info(f"✗ Date found but not green in {col_letter}{row}: {cell_date}, rgb={rgb}")
+                    else:
+                        if pd.notna(cell_date):
+                            logger.info(f"Date doesn't match target month: {cell_date} vs {month}/{year}")
+                except Exception as e:
+                    logger.warning(f"Error processing cell {col_letter}{row}: {e}")
+                    continue
+            else:
+                logger.debug(f"Cell {col_letter}{row} is empty")
+    
+    logger.info(f"FINAL COUNT: Found {count} green dates in {sheet_name} for {month}/{year}")
+    return count
 
 def count_green_dates_in_month(wb, sheet_name, columns, year, month):
-    """Count dates in green cells for a specific month and year from given columns, **all rows**"""
+    """Count dates in green cells for Tower G structure (all rows)"""
     if sheet_name not in wb.sheetnames:
         logger.warning(f"Sheet {sheet_name} not found in workbook")
         return 0
@@ -111,42 +177,59 @@ def count_green_dates_in_month(wb, sheet_name, columns, year, month):
                     continue
     return count
 
-def count_completed_activities_by_month(wb, sheet_names, activity_name, year, month):
+def count_completed_activities_by_month_fixed(wb, sheet_names, activity_name, year, month):
+    """Fixed function to count completed activities from column G (Activity Name) and column L (Actual Finish)"""
     count = 0
+    logger.debug(f"Looking for activity: '{activity_name}' in sheets: {sheet_names}")
+    
     for sheet_name in sheet_names:
         if sheet_name not in wb.sheetnames:
+            logger.debug(f"Sheet {sheet_name} not found, skipping")
             continue
         try:
             sheet = wb[sheet_name]
-            for row in sheet.iter_rows(min_row=2, max_row=100):
-                if len(row) > 6:
-                    activity_cell = row[6]
-                    if activity_cell.value and str(activity_cell.value).strip().lower() == activity_name.lower():
-                        if len(row) > 11:
-                            finish_cell = row[11]
-                            if finish_cell.value:
-                                try:
-                                    finish_date = None
-                                    if isinstance(finish_cell.value, datetime):
-                                        finish_date = finish_cell.value
-                                    elif isinstance(finish_cell.value, str):
-                                        finish_date = pd.to_datetime(finish_cell.value, dayfirst=True, errors='coerce')
-                                    if pd.notna(finish_date) and finish_date.year == year and finish_date.month == month:
-                                        count += 1
-                                        logger.debug(f"Found completed {activity_name} in {sheet_name} on {finish_date}")
-                                except Exception as e:
-                                    logger.debug(f"Error processing finish date: {e}")
-                                    continue
+            logger.debug(f"Processing sheet: {sheet_name}")
+            
+            # Start from row 2 (assuming row 1 is header) and go through reasonable number of rows
+            for row_num in range(2, min(sheet.max_row + 1, 1000)):  # Limit to 1000 rows for performance
+                # Column G (index 6) for Activity Name
+                activity_cell = sheet.cell(row=row_num, column=7)  # Column G is 7th column
+                # Column L (index 11) for Actual Finish
+                finish_cell = sheet.cell(row=row_num, column=12)  # Column L is 12th column
+                
+                if activity_cell.value and finish_cell.value:
+                    activity_text = str(activity_cell.value).strip()
+                    
+                    # More flexible matching - check if activity name is contained in or matches
+                    if (activity_text.lower() == activity_name.lower() or 
+                        activity_name.lower() in activity_text.lower() or
+                        activity_text.lower() in activity_name.lower()):
+                        
+                        try:
+                            finish_date = None
+                            if isinstance(finish_cell.value, datetime):
+                                finish_date = finish_cell.value
+                            elif isinstance(finish_cell.value, str):
+                                finish_date = pd.to_datetime(finish_cell.value, dayfirst=True, errors='coerce')
+                            
+                            if pd.notna(finish_date) and finish_date.year == year and finish_date.month == month:
+                                count += 1
+                                logger.debug(f"Found completed {activity_name} in {sheet_name} row {row_num} on {finish_date}")
+                        except Exception as e:
+                            logger.debug(f"Error processing finish date in {sheet_name} row {row_num}: {e}")
+                            continue
         except Exception as e:
             logger.warning(f"Error processing sheet {sheet_name}: {e}")
             continue
+    
+    logger.info(f"Total count for '{activity_name}' in {month}/{year}: {count}")
     return count
 
 # ---------------------------------------------------------------------------
 # TOWER G STRUCTURE
 # ---------------------------------------------------------------------------
 def get_tower_g_structure_targets():
-    targets = {"June": 1, "July": 1, "August": 1}
+    targets = {"June": 1, "July": 1, "August": 1}  # Keep all months for structure
     logger.info(f"Tower G Structure targets: {targets}")
     return targets
 
@@ -156,10 +239,14 @@ def count_tower_g_completed(cos):
     counts = {m: 0 for m in MONTHS}
     current_year = datetime.now().year
     month_map = {"June": 6, "July": 7, "August": 8}
-    for month_name in MONTHS:
+    
+    # Only process June for now
+    for month_name in ["June"]:
         month_num = month_map[month_name]
         count = count_green_dates_in_month(wb, "Revised Baselines- 25 days SC", TOWER_G_ANTICIPATED_COLS, current_year, month_num)
         counts[month_name] = count
+    
+    # July and August remain 0 (will be filled later)
     logger.info(f"Tower G completed pours by month: {counts}")
     return counts
 
@@ -167,24 +254,18 @@ def build_tower_g_structure_dataframe(targets, completed):
     total_milestones = 1
     weightage = round(100 / total_milestones, 2) if total_milestones else 0
 
-    # Cumulative completed and targets
-    cum_completed = {}
-    cum_targets = {}
-    running_done = 0
-    running_target = 0
-    for m in MONTHS:
-        running_done += completed.get(m, 0)
-        running_target += targets.get(m, 0)
-        cum_completed[m] = running_done
-        cum_targets[m] = running_target
-
+    # Only calculate based on June progress for now
     def pct(m):
-        t = cum_targets[m]
-        d = cum_completed[m]
-        if t == 0:
-            return "0.0%"
-        val = min(round((d / t) * 100, 2), 100)
-        return f"{val}%"
+        if m == "June":
+            t = targets.get("June", 0)
+            d = completed.get("June", 0)
+            if t == 0:
+                return "0.0%"
+            val = min(round((d / t) * 100, 2), 100)
+            return f"{val}%"
+        else:
+            # July and August will be blank for now
+            return ""
 
     target_text = f"{int(sum(targets.values()))} Pours ({int(targets['June'])} Pours-June, {int(targets['July'])} Pours-July & {int(targets['August'])} Pours-August)"
 
@@ -198,21 +279,16 @@ def build_tower_g_structure_dataframe(targets, completed):
         "Weightage": weightage,
         "Weighted Delay against Targets": "",  # Filled below
         "Target achieved in June": f"{completed.get('June', 0)} pour cast out of {int(targets['June'])} planned",
-        "Target achieved in July": f"{completed.get('July', 0)} pour cast out of {int(targets['July'])} planned",
-        "Target achieved in August": f"{completed.get('August', 0)} pour cast out of {int(targets['August'])} planned",
+        "Target achieved in July": "",  # Leave blank for now
+        "Target achieved in August": "",  # Leave blank for now
         "Total achieved": "",
         "Delay Reasons_June 2025": "",
     }
 
-    # Weighted Delay: Use last month for which there's a target
-    last_month = "August"
-    for m in reversed(MONTHS):
-        if cum_targets[m] > 0:
-            last_month = m
-            break
+    # Weighted Delay: Use June progress only for now
     try:
-        last_pct = float(pct(last_month).replace("%", ""))
-        row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+        june_pct = float(pct("June").replace("%", ""))
+        row["Weighted Delay against Targets"] = f"{round((june_pct * weightage) / 100, 2)}%"
     except Exception:
         row["Weighted Delay against Targets"] = ""
 
@@ -220,23 +296,71 @@ def build_tower_g_structure_dataframe(targets, completed):
     return df
 
 # ---------------------------------------------------------------------------
-# TOWER H STRUCTURE
+# TOWER H STRUCTURE - FIXED
 # ---------------------------------------------------------------------------
 def get_tower_h_structure_targets():
-    targets = {"June": 3, "July": 3, "August": 4}
+    targets = {"June": 3, "July": 3, "August": 4}  # Keep all months for structure
     logger.info(f"Tower H Structure targets: {targets}")
     return targets
 
+def debug_tower_h_cells(cos):
+    """Debug function to examine Tower H cells in detail"""
+    raw = download_file_bytes(cos, ELIGO_STRUCTURE_KEY)
+    wb = load_workbook(filename=BytesIO(raw), data_only=True)
+    
+    if "Revised Baselines- 25 days SC" not in wb.sheetnames:
+        logger.error("Revised Baselines- 25 days SC sheet not found!")
+        logger.info(f"Available sheets: {wb.sheetnames}")
+        return
+        
+    sheet = wb["Revised Baselines- 25 days SC"]
+    
+    logger.info("=== TOWER H CELL DEBUG ===")
+    logger.info(f"Checking columns: {TOWER_H_ANTICIPATED_COLS}")
+    logger.info(f"Checking rows: 5-12")
+    
+    for col_letter in TOWER_H_ANTICIPATED_COLS:
+        logger.info(f"\n--- Column {col_letter} ---")
+        for row in range(5, 13):  # rows 5-12
+            cell = sheet[f"{col_letter}{row}"]
+            fill = cell.fill
+            color_code = getattr(fill, "start_color", None)
+            rgb = color_code.rgb if color_code else None
+            
+            logger.info(f"Cell {col_letter}{row}:")
+            logger.info(f"  Value: {cell.value}")
+            logger.info(f"  Type: {type(cell.value)}")
+            logger.info(f"  Fill type: {fill.fill_type}")
+            logger.info(f"  RGB: {rgb}")
+            
+            if cell.value:
+                try:
+                    if isinstance(cell.value, datetime):
+                        logger.info(f"  Parsed date: {cell.value}")
+                        logger.info(f"  Month: {cell.value.month}, Year: {cell.value.year}")
+                except:
+                    logger.info(f"  Could not parse as date")
+
 def count_tower_h_completed(cos):
+    # First run debug
+    debug_tower_h_cells(cos)
+    
     raw = download_file_bytes(cos, ELIGO_STRUCTURE_KEY)
     wb = load_workbook(filename=BytesIO(raw), data_only=True)
     counts = {m: 0 for m in MONTHS}
     current_year = datetime.now().year
     month_map = {"June": 6, "July": 7, "August": 8}
-    for month_name in MONTHS:
+    
+    logger.info("Starting Tower H structure count...")
+    
+    # Only process June for now
+    for month_name in ["June"]:
         month_num = month_map[month_name]
-        count = count_green_dates_in_month(wb, "ELIGO SLAB CYCLE", TOWER_H_ANTICIPATED_COLS, current_year, month_num)
+        # Use the correct sheet name for Tower H
+        count = count_green_dates_in_month_fixed(wb, "Revised Baselines- 25 days SC", TOWER_H_ANTICIPATED_COLS, current_year, month_num, 5, 12)
         counts[month_name] = count
+    
+    # July and August remain 0 (will be filled later)
     logger.info(f"Tower H completed pours by month: {counts}")
     return counts
 
@@ -244,24 +368,18 @@ def build_tower_h_structure_dataframe(targets, completed):
     total_milestones = 1
     weightage = round(100 / total_milestones, 2) if total_milestones else 0
 
-    # Cumulative completed and targets
-    cum_completed = {}
-    cum_targets = {}
-    running_done = 0
-    running_target = 0
-    for m in MONTHS:
-        running_done += completed.get(m, 0)
-        running_target += targets.get(m, 0)
-        cum_completed[m] = running_done
-        cum_targets[m] = running_target
-
+    # Only calculate based on June progress for now
     def pct(m):
-        t = cum_targets[m]
-        d = cum_completed[m]
-        if t == 0:
-            return "0.0%"
-        val = min(round((d / t) * 100, 2), 100)
-        return f"{val}%"
+        if m == "June":
+            t = targets.get("June", 0)
+            d = completed.get("June", 0)
+            if t == 0:
+                return "0.0%"
+            val = min(round((d / t) * 100, 2), 100)
+            return f"{val}%"
+        else:
+            # July and August will be blank for now
+            return ""
 
     target_text = f"{int(sum(targets.values()))} Pours ({int(targets['June'])} Pours-June, {int(targets['July'])} Pours-July & {int(targets['August'])} Pours-August)"
 
@@ -275,21 +393,16 @@ def build_tower_h_structure_dataframe(targets, completed):
         "Weightage": weightage,
         "Weighted Delay against Targets": "",
         "Target achieved in June": f"{completed.get('June', 0)} pour cast out of {int(targets['June'])} planned",
-        "Target achieved in July": f"{completed.get('July', 0)} pour cast out of {int(targets['July'])} planned",
-        "Target achieved in August": f"{completed.get('August', 0)} pour cast out of {int(targets['August'])} planned",
+        "Target achieved in July": "",  # Leave blank for now
+        "Target achieved in August": "",  # Leave blank for now
         "Total achieved": "",
         "Delay Reasons_June 2025": "",
     }
 
-    # Weighted Delay: Use last month for which there's a target
-    last_month = "August"
-    for m in reversed(MONTHS):
-        if cum_targets[m] > 0:
-            last_month = m
-            break
+    # Weighted Delay: Use June progress only for now
     try:
-        last_pct = float(pct(last_month).replace("%", ""))
-        row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+        june_pct = float(pct("June").replace("%", ""))
+        row["Weighted Delay against Targets"] = f"{round((june_pct * weightage) / 100, 2)}%"
     except Exception:
         row["Weighted Delay against Targets"] = ""
 
@@ -297,7 +410,7 @@ def build_tower_h_structure_dataframe(targets, completed):
     return df
 
 # ---------------------------------------------------------------------------
-# TOWER G & H FINISHING (Unchanged from your previous code)
+# TOWER G & H FINISHING - FIXED
 # ---------------------------------------------------------------------------
 def get_tower_g_finishing_targets():
     targets = {
@@ -316,12 +429,18 @@ def count_tower_g_finishing_completed(cos):
     counts = {}
     current_year = datetime.now().year
     month_map = {"June": 6, "July": 7, "August": 8}
+    
+    logger.info("Starting Tower G finishing count...")
+    
     for activity in TOWER_G_ACTIVITIES:
-        counts[activity] = {}
-        for month_name in MONTHS:
+        counts[activity] = {m: 0 for m in MONTHS}  # Initialize all months
+        # Only process June for now
+        for month_name in ["June"]:
             month_num = month_map[month_name]
-            count = count_completed_activities_by_month(wb, target_sheets, activity, current_year, month_num)
+            count = count_completed_activities_by_month_fixed(wb, target_sheets, activity, current_year, month_num)
             counts[activity][month_name] = count
+        # July and August remain 0 (will be filled later)
+    
     logger.info(f"Tower G Finishing completed by month: {counts}")
     return counts
 
@@ -341,8 +460,9 @@ def build_tower_g_finishing_dataframe(targets, completed):
             "Delay Reasons_June 2025": "",
         }
         for m in MONTHS:
-            if m in prev_months:
-                months_to_count = MONTHS[:month_indices[m] + 1]
+            if m == "June" and m in prev_months:
+                # Only process June if it's in previous months
+                months_to_count = ["June"]
                 count_cumulative = sum(completed[activity][month] for month in months_to_count)
                 target_cumulative = sum(targets[activity][month] for month in months_to_count)
                 if target_cumulative == 0:
@@ -354,7 +474,7 @@ def build_tower_g_finishing_dataframe(targets, completed):
                 count_in_month = completed[activity][m]
                 if month_target == 0:
                     future_months = []
-                    for future_m in MONTHS[month_indices[m] + 1:]:
+                    for future_m in MONTHS[1:]:  # July and August
                         if targets[activity][future_m] > 0:
                             future_months.append(future_m)
                     if future_months:
@@ -367,6 +487,7 @@ def build_tower_g_finishing_dataframe(targets, completed):
                 else:
                     row[f"Target achieved in {m}"] = f"{count_in_month} Flats out of {int(month_target)} planned"
             else:
+                # Leave July and August columns blank for now
                 row[f"% Work Done against Target-Till {m}"] = ""
                 row[f"Target achieved in {m}"] = ""
         if "June" in prev_months:
@@ -394,7 +515,7 @@ def build_tower_g_finishing_dataframe(targets, completed):
 
 def get_tower_h_finishing_targets():
     targets = {
-        "HVAC first fix": {"June": 16, "July": 0, "August": 0},
+        "HVAC 1st Fix": {"June": 16, "July": 0, "August": 0},
         "POP punning (Major area)": {"June": 13, "July": 8, "August": 8},
         "Wall Tiling": {"June": 8, "July": 39, "August": 9},
         "Floor Tiling": {"June": 14, "July": 39, "August": 9}
@@ -410,12 +531,18 @@ def count_tower_h_finishing_completed(cos):
     counts = {}
     current_year = datetime.now().year
     month_map = {"June": 6, "July": 7, "August": 8}
+    
+    logger.info("Starting Tower H finishing count...")
+    
     for activity in TOWER_H_ACTIVITIES:
-        counts[activity] = {}
-        for month_name in MONTHS:
+        counts[activity] = {m: 0 for m in MONTHS}  # Initialize all months
+        # Only process June for now
+        for month_name in ["June"]:
             month_num = month_map[month_name]
-            count = count_completed_activities_by_month(wb, target_sheets, activity, current_year, month_num)
+            count = count_completed_activities_by_month_fixed(wb, target_sheets, activity, current_year, month_num)
             counts[activity][month_name] = count
+        # July and August remain 0 (will be filled later)
+    
     logger.info(f"Tower H Finishing completed by month: {counts}")
     return counts
 
@@ -435,8 +562,9 @@ def build_tower_h_finishing_dataframe(targets, completed):
             "Delay Reasons_June 2025": "",
         }
         for m in MONTHS:
-            if m in prev_months:
-                months_to_count = MONTHS[:month_indices[m] + 1]
+            if m == "June" and m in prev_months:
+                # Only process June if it's in previous months
+                months_to_count = ["June"]
                 count_cumulative = sum(completed[activity][month] for month in months_to_count)
                 target_cumulative = sum(targets[activity][month] for month in months_to_count)
                 if target_cumulative == 0:
@@ -448,7 +576,7 @@ def build_tower_h_finishing_dataframe(targets, completed):
                 count_in_month = completed[activity][m]
                 if month_target == 0:
                     future_months = []
-                    for future_m in MONTHS[month_indices[m] + 1:]:
+                    for future_m in MONTHS[1:]:  # July and August
                         if targets[activity][future_m] > 0:
                             future_months.append(future_m)
                     if future_months:
@@ -461,6 +589,7 @@ def build_tower_h_finishing_dataframe(targets, completed):
                 else:
                     row[f"Target achieved in {m}"] = f"{count_in_month} Flats out of {int(month_target)} planned"
             else:
+                # Leave July and August columns blank for now
                 row[f"% Work Done against Target-Till {m}"] = ""
                 row[f"Target achieved in {m}"] = ""
         if "June" in prev_months:

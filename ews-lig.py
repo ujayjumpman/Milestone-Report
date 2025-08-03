@@ -49,10 +49,8 @@ YELLOW = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid"
 GREY = PatternFill(start_color="D3D3D3", end_color="D3D3D3", fill_type="solid")
 
 def get_previous_months():
-    now = datetime.now()
-    current_month = now.month
-    month_map = {"June": 6, "July": 7, "August": 8}
-    return [m for m in MONTHS if month_map[m] < current_month]
+    # Modified to return only June for display purposes
+    return ["June"]
 
 def detect_tracker_year(sheet, pour_cols, row_start, row_end):
     years_found = set()
@@ -120,17 +118,22 @@ def count_pours(sheet, pour_cols, row_start, row_end, months, year):
     return month_counts
 
 def build_structure_dataframe(tower_name, targets, completed):
-    prev_months = get_previous_months()
+    # Only show results for June, but keep all targets for "Target Till August"
+    prev_months = get_previous_months()  # This will return only ["June"]
     weightage = 100
+    
+    # Calculate cumulative targets (still use all months for "Target Till August")
     cum_targets = {}
     cum_completed = {}
     for i, m in enumerate(MONTHS):
         months_to_count = MONTHS[:i+1]
         cum_targets[m] = sum(targets[mm] for mm in months_to_count)
-        cum_completed[m] = sum(completed[mm] for mm in months_to_count)
+        cum_completed[m] = sum(completed[mm] for mm in months_to_count if mm in prev_months)
 
     def pct(m):
-        if m not in prev_months: return ""
+        # Only show percentage for June
+        if m != "June":
+            return ""  # Leave July and August blank
         t = cum_targets[m]
         d = cum_completed[m]
         if t == 0: return "0.0%"
@@ -141,25 +144,26 @@ def build_structure_dataframe(tower_name, targets, completed):
         "Milestone": f"{tower_name} Structure",
         "Target Till August": f"{sum(targets.values())} Pours ({targets['June']} June, {targets['July']} July, {targets['August']} August)",
         "% Work Done against Target-Till June": pct("June"),
-        "% Work Done against Target-Till July": pct("July"),
-        "% Work Done against Target-Till August": pct("August"),
+        "% Work Done against Target-Till July": "",  # Blank
+        "% Work Done against Target-Till August": "",  # Blank
         "Weightage": weightage,
         "Weighted Delay against Targets": "",
         "Target achieved in June": f"{completed.get('June', 0)} out of {targets.get('June', 0)}",
-        "Target achieved in July": f"{completed.get('July', 0)} out of {targets.get('July', 0)}",
-        "Target achieved in August": f"{completed.get('August', 0)} out of {targets.get('August', 0)}",
-        "Total achieved": f"{sum(completed.values())} out of {sum(targets.values())}",
+        "Target achieved in July": "",  # Blank
+        "Target achieved in August": "",  # Blank
+        "Total achieved": f"{completed.get('June', 0)} out of {sum(targets.values())}",  # Only June achieved vs total target
         "Delay Reasons": "",
     }
-    if prev_months:
-        last_month = prev_months[-1]
-        last_pct_str = pct(last_month)
-        if last_pct_str:
-            try:
-                last_pct = float(last_pct_str.replace("%", ""))
-                row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
-            except Exception:
-                row["Weighted Delay against Targets"] = "0.0%"
+    
+    # Calculate weighted delay only for June
+    june_pct_str = pct("June")
+    if june_pct_str:
+        try:
+            june_pct = float(june_pct_str.replace("%", ""))
+            row["Weighted Delay against Targets"] = f"{round((june_pct * weightage) / 100, 2)}%"
+        except Exception:
+            row["Weighted Delay against Targets"] = "0.0%"
+    
     df = pd.DataFrame([row])
     return df
 

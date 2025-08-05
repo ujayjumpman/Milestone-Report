@@ -548,6 +548,7 @@ def find_generated_file(project_config, project_name):
     patterns = project_config['patterns']
     
     for pattern in patterns:
+        st.write(f"🔍 Searching with pattern: {pattern}")
         matches = glob.glob(pattern)
         if matches:
             # Get the most recent file
@@ -557,7 +558,10 @@ def find_generated_file(project_config, project_name):
             
             # Check if file was created recently (within last 10 minutes)
             if (current_time - file_time) < 600:  # 10 minutes
+                st.write(f"✅ Found recent file: {latest_file}")
                 return latest_file
+            else:
+                st.write(f"⏰ File found but too old: {latest_file}")
     
     # Check for any new Excel files created
     all_excel = glob.glob("*.xlsx")
@@ -567,9 +571,31 @@ def find_generated_file(project_config, project_name):
         current_time = time.time()
         
         if (current_time - file_time) < 600:  # 10 minutes
+            st.write(f"📄 Found recent Excel file: {latest_new_file}")
             return latest_new_file
     
     return None
+
+def monitor_memory_during_execution():
+    """Monitor and display current system status"""
+    try:
+        memory_info = psutil.virtual_memory()
+        cpu_percent = psutil.cpu_percent(interval=1)
+        
+        st.markdown(f"""
+        <div class="system-info">
+            <strong>💻 System Status:</strong><br>
+            🧠 Memory: {memory_info.percent:.1f}% used ({memory_info.available / (1024**3):.1f} GB available)<br>
+            ⚡ CPU: {cpu_percent:.1f}% usage<br>
+            🔧 Active Python processes: {len([p for p in psutil.process_iter() if 'python' in p.name().lower()])}
+        </div>
+        """, unsafe_allow_html=True)
+        
+        return memory_info.percent
+        
+    except Exception as e:
+        st.write(f"⚠️ Could not monitor system status: {e}")
+        return 0
 
 def run_project_script(project_name):
     """Enhanced script execution with proper resource management"""
@@ -577,13 +603,25 @@ def run_project_script(project_name):
         project_config = PROJECTS[project_name]
         script_path = project_config['script']
         
+        # Show system status before execution
+        memory_before = monitor_memory_during_execution()
+        
+        # Enhanced debugging information
+        st.write(f"🔧 **Debug Information for {project_name}:**")
+        st.write(f"📝 Script path: {script_path}")
+        st.write(f"📁 Current directory: {os.getcwd()}")
+        st.write(f"🐍 Python executable: {sys.executable}")
+        
         # Check if script file exists
         if not os.path.exists(script_path):
             available_files = [f for f in os.listdir('.') if f.endswith('.py')]
             return False, f"❌ Script file '{script_path}' not found in current directory.\n\nAvailable Python files: {available_files}"
         
+        st.write(f"✅ Script file found: {script_path}")
+        
         # Store existing Excel files before execution
         files_before = set(glob.glob("*.xlsx"))
+        st.write(f"📊 Excel files before execution: {len(files_before)}")
         
         # Enhanced timeout settings
         timeout_settings = {
@@ -594,6 +632,8 @@ def run_project_script(project_name):
             'Eden': 450          # 7.5 minutes
         }
         timeout_duration = timeout_settings.get(project_name, 300)
+        
+        st.write(f"🚀 Executing script: {script_path} (timeout: {timeout_duration//60} minutes)")
         
         # Create enhanced environment
         env = os.environ.copy()
@@ -609,6 +649,8 @@ def run_project_script(project_name):
         })
         
         start_time = time.time()
+        progress_placeholder = st.empty()
+        progress_placeholder.info(f"⏱️ Running {project_name} script... (Max wait: {timeout_duration//60} minutes)")
         
         # Use Popen for better process control
         process = subprocess.Popen(
@@ -627,9 +669,15 @@ def run_project_script(project_name):
             stdout, stderr = process.communicate(timeout=timeout_duration)
             elapsed_time = time.time() - start_time
             
+            if process.returncode == 0:
+                progress_placeholder.success(f"✅ Script completed in {elapsed_time:.1f} seconds")
+            else:
+                progress_placeholder.error(f"❌ Script failed with return code {process.returncode}")
+                
         except subprocess.TimeoutExpired:
             # Handle timeout more gracefully
             elapsed_time = time.time() - start_time
+            progress_placeholder.error(f"⏱️ Script timed out after {elapsed_time:.1f} seconds")
             
             # Terminate the process
             process.terminate()
@@ -640,6 +688,7 @@ def run_project_script(project_name):
                 process.wait()
             
             # Clean up any remaining processes
+            st.write("🧹 **Performing emergency cleanup...**")
             cleanup_resources()
             
             timeout_msg = f"""
@@ -647,7 +696,7 @@ def run_project_script(project_name):
 
 **This could indicate:**
 1. **Large dataset processing** - The script is processing very large files
-2. **Memory issues** - System running out of memory
+2. **Memory issues** - System running out of memory (was {memory_before:.1f}% before execution)
 3. **Infinite loop** - Bug in the script causing it to loop
 4. **Resource contention** - Previous script execution interfering
 
@@ -668,6 +717,23 @@ This will show you exactly where the script stops or gets stuck.
             """
             return False, timeout_msg
         
+        # Show memory status after execution
+        memory_after = monitor_memory_during_execution()
+        memory_change = memory_after - memory_before
+        if memory_change > 10:
+            st.warning(f"⚠️ Significant memory increase: +{memory_change:.1f}%")
+        
+        # Enhanced result logging
+        st.write(f"📤 Script execution completed with return code: {process.returncode}")
+        
+        if stdout:
+            st.write("📄 **Script Output (stdout):**")
+            st.code(stdout[:1000] + ("..." if len(stdout) > 1000 else ""))
+        
+        if stderr:
+            st.write("⚠️ **Script Errors (stderr):**")
+            st.code(stderr[:1000] + ("..." if len(stderr) > 1000 else ""))
+        
         # Check execution result
         if process.returncode != 0:
             error_details = f"""
@@ -680,12 +746,17 @@ STDERR: {stderr}
         # Check for new files after execution
         files_after = set(glob.glob("*.xlsx"))
         new_files = files_after - files_before
+        st.write(f"📊 Excel files after execution: {len(files_after)} (New: {len(new_files)})")
+        
+        if new_files:
+            st.write(f"🆕 New Excel files created: {list(new_files)}")
         
         # Look for generated file
         generated_file = find_generated_file(project_config, project_name)
         
         if generated_file and os.path.exists(generated_file):
             file_size = os.path.getsize(generated_file)
+            st.write(f"✅ **Report file found:** {generated_file} ({file_size:,} bytes)")
             return True, generated_file
         
         # Diagnostic information if file not found
@@ -792,8 +863,10 @@ def main():
         progress_bar.empty()
         status_text.empty()
         
-        # Run the actual script (removed debug expander)
-        success, result = run_project_script(proj)
+        # Create a debug expander for detailed logging
+        with st.expander("🔍 Debug Information", expanded=True):
+            # Run the actual script
+            success, result = run_project_script(proj)
         
         if success:
             st.session_state.report_file = result

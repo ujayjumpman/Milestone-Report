@@ -3,3 +3,5 @@ pandas
 openpyxl
 ibm-cos-sdk
 python-dotenv
+psutil
+

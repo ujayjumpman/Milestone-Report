@@ -3,6 +3,8 @@ import subprocess
 import sys
 import os
 import time
+import gc
+import psutil
 from datetime import datetime
 import glob
 import traceback
@@ -296,6 +298,21 @@ st.markdown("""
         backdrop-filter: blur(10px);
     }
     
+    /* Clear memory button styling */
+    .clear-memory-btn {
+        background: linear-gradient(135deg, #e74c3c, #c0392b) !important;
+        color: white !important;
+        border: none !important;
+        padding: 0.8rem 1.5rem !important;
+        border-radius: 10px !important;
+        font-size: 0.9rem !important;
+        font-weight: 600 !important;
+        transition: all 0.3s ease !important;
+        box-shadow: 0 4px 15px rgba(231, 76, 60, 0.3) !important;
+        width: 100% !important;
+        height: 50px !important;
+    }
+    
     /* Divider */
     hr {
         border: none;
@@ -347,6 +364,29 @@ st.markdown("""
             margin-left: 0.5rem;
         }
     }
+    
+    /* Debug info styling */
+    .debug-info {
+        background: linear-gradient(135deg, #f0f4f8, #e2e8f0);
+        border: 2px solid #718096;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 1rem 0;
+        font-family: monospace;
+        font-size: 0.9rem;
+        color: #2d3748;
+    }
+    
+    /* System info styling */
+    .system-info {
+        background: linear-gradient(135deg, #e8f5e8, #f0f8f0);
+        border: 2px solid #27ae60;
+        border-radius: 10px;
+        padding: 1rem;
+        margin: 1rem 0;
+        font-size: 0.9rem;
+        color: #155724;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -357,7 +397,7 @@ if 'messages' not in st.session_state:
     st.session_state.selected_project = None
     st.session_state.report_file = None
 
-# Project configurations
+# Project configurations - Enhanced with better debugging
 PROJECTS = {
     'Veridia': {
         'script': 'veridia.py',
@@ -415,6 +455,66 @@ PROJECTS = {
     }
 }
 
+def cleanup_resources():
+    """Clean up system resources between script executions"""
+    try:
+        st.write("🧹 **Cleaning up system resources...**")
+        
+        # Force garbage collection
+        gc.collect()
+        
+        # Kill any orphaned Python processes (be careful with this)
+        current_pid = os.getpid()
+        killed_processes = 0
+        
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                if proc.info['name'] in ['python', 'python.exe']:
+                    # Check if it's a subprocess of our scripts
+                    cmdline = proc.info['cmdline'] or []
+                    script_names = ['veridia.py', 'eligo.py', 'ews-lig.py', 'wavecityclub.py', 'eden.py']
+                    if any(script in ' '.join(cmdline) for script in script_names):
+                        if proc.info['pid'] != current_pid:
+                            proc.terminate()
+                            proc.wait(timeout=3)
+                            killed_processes += 1
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.TimeoutExpired):
+                continue
+        
+        if killed_processes > 0:
+            st.write(f"🔄 Terminated {killed_processes} orphaned script processes")
+        
+        # Clear any temporary files that might be locked
+        temp_patterns = ['~$*.xlsx', '*.tmp', '.~lock.*', '__pycache__']
+        cleaned_files = 0
+        
+        for pattern in temp_patterns:
+            for file in glob.glob(pattern):
+                try:
+                    if os.path.isfile(file):
+                        os.remove(file)
+                        cleaned_files += 1
+                    elif os.path.isdir(file):
+                        import shutil
+                        shutil.rmtree(file)
+                        cleaned_files += 1
+                except:
+                    pass
+        
+        if cleaned_files > 0:
+            st.write(f"🗑️ Cleaned {cleaned_files} temporary files")
+        
+        # Brief pause to let system settle
+        time.sleep(2)
+        
+        # Show memory status after cleanup
+        memory_info = psutil.virtual_memory()
+        st.write(f"💾 **Memory after cleanup:** {memory_info.percent:.1f}% used ({memory_info.available / (1024**3):.1f} GB available)")
+        st.success("✅ Resource cleanup completed!")
+        
+    except Exception as e:
+        st.write(f"⚠️ Resource cleanup warning: {e}")
+
 def add_message(role, content):
     """Add a message to the chat history"""
     st.session_state.messages.append({
@@ -462,13 +562,17 @@ def find_generated_file(project_config, project_name):
     # Check for any new Excel files created
     all_excel = glob.glob("*.xlsx")
     if all_excel:
-        latest_file = max(all_excel, key=os.path.getctime)
-        return latest_file
+        latest_new_file = max(all_excel, key=os.path.getctime)
+        file_time = os.path.getctime(latest_new_file)
+        current_time = time.time()
+        
+        if (current_time - file_time) < 600:  # 10 minutes
+            return latest_new_file
     
     return None
 
 def run_project_script(project_name):
-    """Run the project script and return the generated file path"""
+    """Enhanced script execution with proper resource management"""
     try:
         project_config = PROJECTS[project_name]
         script_path = project_config['script']
@@ -476,85 +580,139 @@ def run_project_script(project_name):
         # Check if script file exists
         if not os.path.exists(script_path):
             available_files = [f for f in os.listdir('.') if f.endswith('.py')]
-            return False, f"❌ Script file '{script_path}' not found in current directory.\n\nAvailable Python files: {available_files}\n\nPlease ensure '{script_path}' exists in the current directory."
+            return False, f"❌ Script file '{script_path}' not found in current directory.\n\nAvailable Python files: {available_files}"
+        
+        # Store existing Excel files before execution
+        files_before = set(glob.glob("*.xlsx"))
+        
+        # Enhanced timeout settings
+        timeout_settings = {
+            'Veridia': 900,      # 15 minutes for Veridia
+            'Eligo': 600,        # 10 minutes for Eligo  
+            'EWS-LIG': 600,      # 10 minutes
+            'WaveCityClub': 450, # 7.5 minutes
+            'Eden': 450          # 7.5 minutes
+        }
+        timeout_duration = timeout_settings.get(project_name, 300)
+        
+        # Create enhanced environment
+        env = os.environ.copy()
+        env.update({
+            'PYTHONUNBUFFERED': '1',
+            'MPLBACKEND': 'Agg',
+            'OPENBLAS_NUM_THREADS': '1',  # Limit BLAS threads
+            'MKL_NUM_THREADS': '1',       # Limit MKL threads
+            'NUMEXPR_NUM_THREADS': '1',   # Limit NumExpr threads
+            'OMP_NUM_THREADS': '1',       # Limit OpenMP threads
+            'PYTHONDONTWRITEBYTECODE': '1',  # Don't create .pyc files
+            'PYTHONHASHSEED': '0',           # Consistent hashing
+        })
+        
+        start_time = time.time()
+        
+        # Use Popen for better process control
+        process = subprocess.Popen(
+            [sys.executable, script_path],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            cwd=os.getcwd(),
+            env=env,
+            bufsize=1,
+            universal_newlines=True
+        )
         
         try:
-            # Set timeout based on project
-            timeout_duration = 600 if project_name == 'Veridia' else 300  # 10 minutes for Veridia, 5 for others
-            
-            # Set environment variables to prevent hanging
-            env = os.environ.copy()
-            env['PYTHONUNBUFFERED'] = '1'  # Force unbuffered output
-            env['MPLBACKEND'] = 'Agg'      # Use non-interactive matplotlib backend
-            
-            result = subprocess.run(
-                [sys.executable, script_path],
-                capture_output=True,
-                text=True,
-                timeout=timeout_duration,
-                cwd=os.getcwd(),
-                env=env
-            )
+            # Wait for completion with timeout
+            stdout, stderr = process.communicate(timeout=timeout_duration)
+            elapsed_time = time.time() - start_time
             
         except subprocess.TimeoutExpired:
-            if project_name == 'Veridia':
-                timeout_msg = f"""
-⏱️ **Veridia script timed out after {timeout_duration//60} minutes.**
+            # Handle timeout more gracefully
+            elapsed_time = time.time() - start_time
+            
+            # Terminate the process
+            process.terminate()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait()
+            
+            # Clean up any remaining processes
+            cleanup_resources()
+            
+            timeout_msg = f"""
+⏱️ **{project_name} script timed out after {timeout_duration//60} minutes.**
 
-This usually indicates one of these issues:
-1. **Large dataset processing**: The script may be processing very large Excel/CSV files
-2. **Infinite loop**: There might be a bug causing the script to loop indefinitely  
-3. **External dependencies**: The script might be waiting for a database connection, API response, or file lock
-4. **Memory issues**: The script might have run out of memory with large datasets
+**This could indicate:**
+1. **Large dataset processing** - The script is processing very large files
+2. **Memory issues** - System running out of memory
+3. **Infinite loop** - Bug in the script causing it to loop
+4. **Resource contention** - Previous script execution interfering
+
+**Recommended actions:**
+1. Click "Clear Memory" button before trying again
+2. Check system resources (memory/CPU usage)
+3. Try running `{script_path}` manually to identify the bottleneck
+4. Consider restarting the Streamlit app to clear all resources
+5. Break large input files into smaller chunks if applicable
 
 **To debug manually:**
 ```bash
-cd /path/to/your/script/directory
-python veridia.py
+cd {os.getcwd()}
+python {script_path}
 ```
-                """
-            else:
-                timeout_msg = f"⏱️ Script execution timed out ({timeout_duration//60} minutes). The script may be stuck or processing large amounts of data."
-            
+
+This will show you exactly where the script stops or gets stuck.
+            """
             return False, timeout_msg
         
         # Check execution result
-        if result.returncode != 0:
+        if process.returncode != 0:
             error_details = f"""
-Return Code: {result.returncode}
-STDOUT: {result.stdout}
-STDERR: {result.stderr}
+Return Code: {process.returncode}
+STDOUT: {stdout}
+STDERR: {stderr}
             """
-            return False, f"❌ Script execution failed with return code {result.returncode}.\n\nDetails:\n{error_details}"
+            return False, f"❌ Script execution failed with return code {process.returncode}.\n\nDetails:\n{error_details}"
         
-        # Look for generated file using project-specific patterns
+        # Check for new files after execution
+        files_after = set(glob.glob("*.xlsx"))
+        new_files = files_after - files_before
+        
+        # Look for generated file
         generated_file = find_generated_file(project_config, project_name)
         
         if generated_file and os.path.exists(generated_file):
+            file_size = os.path.getsize(generated_file)
             return True, generated_file
         
-        # If no file found, provide error message
+        # Diagnostic information if file not found
         all_excel = glob.glob("*.xlsx")
         error_msg = f"""
 ❌ **Report file not found after script execution.**
 
-**Possible issues:**
-1. The script may not be generating an Excel file
-2. The file may be saved in a different directory
-3. The filename pattern may not match our search patterns
-4. The script may have failed silently
+**Diagnostics:**
+- Script executed successfully (return code: {process.returncode})
+- Patterns searched: {project_config['patterns']}
+- All Excel files in directory: {all_excel}
+- New files created: {list(new_files) if new_files else 'None'}
 
-**All Excel files in directory:** {all_excel}
+**Script Output:**
+STDOUT: {stdout[:500]}...
+STDERR: {stderr[:500]}...
         """
-        
         return False, error_msg
 
-    except subprocess.TimeoutExpired:
-        return False, "⏱️ Script execution timed out. Please check if the script is processing large amounts of data."
-    except FileNotFoundError as e:
-        return False, f"❌ Python interpreter not found: {str(e)}. Please ensure Python is installed and accessible."
     except Exception as e:
-        return False, f"❌ Unexpected error occurred: {str(e)}"
+        cleanup_resources()  # Clean up on any error
+        error_details = f"""
+Exception Type: {type(e).__name__}
+Exception Message: {str(e)}
+Traceback: {traceback.format_exc()}
+        """
+        return False, f"❌ Unexpected error occurred:\n{error_details}"
 
 def main():
     st.markdown('<div class="main-container">', unsafe_allow_html=True)
@@ -564,6 +722,17 @@ def main():
     <div class="main-title">📊 Milestone Report Generator</div>
     <div class="subtitle">Generate comprehensive milestone reports with just one click</div>
     """, unsafe_allow_html=True)
+    
+    # Add Clear Memory button if there's a selected project
+    if st.session_state.get('selected_project') or st.session_state.stage != 'welcome':
+        col1, col2 = st.columns([4, 1])
+        with col2:
+            if st.button("🧹 Clear Memory", help="Clear system resources and memory", key="clear_memory_btn"):
+                with st.spinner("Clearing system resources..."):
+                    cleanup_resources()
+                    time.sleep(1)
+                st.rerun()
+    
     st.markdown("---")
 
     # Intro messages
@@ -623,7 +792,7 @@ def main():
         progress_bar.empty()
         status_text.empty()
         
-        # Run the actual script (without debug expander)
+        # Run the actual script (removed debug expander)
         success, result = run_project_script(proj)
         
         if success:
@@ -709,20 +878,30 @@ def main():
             
             5. **Path issues**: Verify that all file paths in the script are correct.
             
+            6. **Memory/Resource issues**: Try clicking "Clear Memory" button and then retry.
+            
             **Next steps:**
             - Try running `{info.get('script', 'unknown.py')}` manually from the command line
             - Check the script's dependencies and requirements
             - Verify input data files are present and accessible
+            - Clear memory and restart if needed
             """)
 
         # Action buttons
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
+            if st.button("🧹 Clear & Retry", use_container_width=True, help="Clear memory and try again"):
+                with st.spinner("Clearing resources..."):
+                    cleanup_resources()
+                st.session_state.stage = 'processing'
+                add_message('bot', f"🔄 Cleared memory and retrying the {info['display_name']} report generation...")
+                st.rerun()
+        with col2:
             if st.button("🔄 Try Again", use_container_width=True):
                 st.session_state.stage = 'processing'
                 add_message('bot', f"Retrying the {info['display_name']} report generation...")
                 st.rerun()
-        with col2:
+        with col3:
             if st.button("🏠 Start Over", use_container_width=True):
                 st.session_state.messages = []
                 st.session_state.stage = 'welcome'
@@ -740,6 +919,9 @@ def main():
       <div>Automated report generation for project milestones</div>
       <div style="margin-top:1rem; font-size:0.9rem;">
         Supported Projects: Veridia • Eligo • EWS-LIG • WaveCityClub • Eden
+      </div>
+      <div style="margin-top:0.5rem; font-size:0.8rem; color: rgba(255,255,255,0.6);">
+        💡 Tip: Use "Clear Memory" between reports for optimal performance
       </div>
     </div>
     """, unsafe_allow_html=True)

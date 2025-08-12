@@ -1,5 +1,3 @@
-
-
 import os
 import logging
 from io import BytesIO
@@ -12,6 +10,7 @@ from openpyxl.utils import get_column_letter
 from dotenv import load_dotenv
 import ibm_boto3
 from ibm_botocore.client import Config
+import re
 
 # ======================= CONFIG =======================
 load_dotenv()
@@ -25,30 +24,300 @@ BUCKET         = os.getenv("COS_BUCKET_NAME")
 KRA_KEY        = os.getenv("KRA_FILE_PATH")          # EDEN Targets Till August 2025.xlsx
 TRACKER_KEY    = os.getenv("EDEN_TRACKER_PATH")      # Eden/Structure Work Tracker (01-07-2025).xlsx
 
-# All months to show activities for
-MONTHS = ["June", "July", "August"]
-MONTH_COLUMNS = {"June": 2, "July": 3, "August": 4}
-
-# Current month for which we have tracker data (change this as needed)
-CURRENT_TRACKER_MONTH = "June"  # Only this month will have percentage calculations
-
-# Tower to Sheet mapping for tracker file
-TOWER_SHEET_MAP = {
-    "Tower 4": "Tower 4",
-    "Tower 5": "Tower 5", 
-    "Tower 6": "Tower 6",
-    "Tower 7": "Tower 7",
-    "NTA-01": "Non Tower Area",
-    "NTA-02": "Non Tower Area",
+# Fixed cell/row positions (THESE CAN BE HARDCODED as per requirement)
+KRA_PARENT_ROW = {
+    "Tower 4": [5, 6],    # B5, B6 (Upper basement, beam/slab etc.)
+    "Tower 5": [8, 9],    # B8, B9 
+    "Tower 6": [11, 12],  # B11, B12
+    "Tower 7": [14, 15],  # B14, B15
+    "NTA-01": [17, 18],   # B17, B18
+    "NTA-02": [20, 21],   # B20, B21
 }
 
-# HARDCODED VALUES FOR SPECIFIC TOWERS
-HARDCODED_PERCENTAGES = {
-    "Tower 4": 55.0,
-    "Tower 6": 60.0, 
-    "NTA-01": 0.0,
-    "NTA-02": 0.0
+KRA_ACTIVITY_ROW = {
+    "Tower 4": 7,     # B7 - Child activity for Tower 4
+    "Tower 5": 10,    # B10 - Child activity for Tower 5  
+    "Tower 6": 13,    # B13 - Child activity for Tower 6
+    "Tower 7": 16,    # B16 - Child activity for Tower 7
+    "NTA-01": 19,     # B19 - Child activity for NTA-01
+    "NTA-02": 22,     # B22 - Child activity for NTA-02
 }
+
+# Fixed column positions in tracker sheet (THESE CAN BE HARDCODED)
+TASK_NAME_COL = 4  # D column (Task Name)
+PCT_COL = 7        # G column (% Complete) - PRIMARY
+PCT_COL_ALT = [6, 8, 9, 10, 5]  # Alternative percentage columns to check
+RESPONSIBLE_COL = 6  # F column (Responsible Person)
+DELAY_COL = 8        # H column (Delay Reasons)
+
+# ============= DYNAMIC DISCOVERY FUNCTIONS ==================
+def discover_months_and_columns(kra_ws):
+    """Dynamically discover available months and their column positions from KRA sheet headers"""
+    months_found = {}
+    
+    # Check first few rows for month headers (typically in row 1 or 2)
+    for row in range(1, 5):  # Check first 4 rows
+        for col in range(1, 25):  # Increased range to 25 columns
+            cell_value = kra_ws.cell(row=row, column=col).value
+            if cell_value:
+                cell_str = str(cell_value).strip()
+                # Look for month names (case insensitive) with year patterns
+                month_patterns = {
+                    'january': ['january', 'jan'], 'february': ['february', 'feb'], 
+                    'march': ['march', 'mar'], 'april': ['april', 'apr'], 
+                    'may': ['may'], 'june': ['june', 'jun'], 
+                    'july': ['july', 'jul'], 'august': ['august', 'aug'], 
+                    'september': ['september', 'sep', 'sept'], 'october': ['october', 'oct'], 
+                    'november': ['november', 'nov'], 'december': ['december', 'dec']
+                }
+                
+                cell_lower = cell_str.lower()
+                for full_month, patterns in month_patterns.items():
+                    for pattern in patterns:
+                        if pattern in cell_lower:
+                            # Use the full month name consistently
+                            month_name = full_month.capitalize()
+                            if month_name not in months_found:  # Avoid duplicates
+                                months_found[month_name] = col
+                                logger.info(f"Found month '{month_name}' in column {col} (original: '{cell_str}')")
+                            break
+                    if full_month.capitalize() in months_found:
+                        break
+    
+    return months_found
+
+def discover_current_month(tracker_filename):
+    """Dynamically determine current month from tracker filename or latest data"""
+    # Extract date from filename if present
+    date_pattern = r'(\d{2}-\d{2}-\d{4})'
+    match = re.search(date_pattern, tracker_filename)
+    
+    if match:
+        date_str = match.group(1)
+        try:
+            file_date = datetime.strptime(date_str, "%d-%m-%Y")
+            current_month = file_date.strftime("%B").capitalize()  # Full month name
+            logger.info(f"Extracted current month '{current_month}' from tracker filename")
+            return current_month
+        except ValueError as e:
+            logger.warning(f"Could not parse date from filename: {e}")
+    
+    # Fallback to current system date
+    current_month = datetime.now().strftime("%B").capitalize()
+    logger.info(f"Using system current month: {current_month}")
+    return current_month
+
+def discover_towers(kra_ws):
+    """Dynamically discover available towers from KRA sheet - FIXED to be more precise"""
+    towers_found = []
+    
+    # Look for tower names in the first few columns (typically column A or B)
+    for col in range(1, 5):  # Check first few columns
+        for row in range(1, 50):  # Check first 50 rows
+            cell_value = kra_ws.cell(row=row, column=col).value
+            if cell_value:
+                cell_str = str(cell_value).strip()
+                
+                # Look for tower patterns - be more specific
+                tower_match = re.match(r'^Tower\s*(\d+)$', cell_str, re.IGNORECASE)
+                if tower_match:
+                    tower_num = tower_match.group(1)
+                    tower_name = f"Tower {tower_num}"
+                    if tower_name not in towers_found:
+                        towers_found.append(tower_name)
+                        logger.info(f"Found tower: {tower_name} at row {row}, col {col}")
+                
+                # Look for NTA patterns - be more specific
+                nta_match = re.match(r'^NTA[-\s]*(\d+)$', cell_str, re.IGNORECASE)
+                if nta_match:
+                    nta_num = nta_match.group(1)
+                    nta_name = f"NTA-{nta_num.zfill(2)}"  # Ensure 2-digit format
+                    if nta_name not in towers_found:
+                        towers_found.append(nta_name)
+                        logger.info(f"Found NTA: {nta_name} at row {row}, col {col}")
+    
+    return towers_found
+
+def discover_tracker_sheets(tracker_wb):
+    """Dynamically discover and map tracker sheets - FIXED"""
+    sheet_mapping = {}
+    
+    for sheet_name in tracker_wb.sheetnames:
+        sheet_name_clean = sheet_name.strip()
+        
+        # Map tower sheets - be more specific
+        tower_match = re.search(r'Tower\s*(\d+)', sheet_name_clean, re.IGNORECASE)
+        if tower_match:
+            tower_number = tower_match.group(1)
+            tower_key = f"Tower {tower_number}"
+            sheet_mapping[tower_key] = sheet_name_clean
+            logger.info(f"Mapped {tower_key} to sheet '{sheet_name_clean}'")
+        
+        # Map NTA sheets (usually named "Non Tower Area" or similar)
+        elif re.search(r'non.*tower.*area', sheet_name_clean, re.IGNORECASE):
+            # Both NTA-01 and NTA-02 typically map to the same "Non Tower Area" sheet
+            sheet_mapping["NTA-01"] = sheet_name_clean
+            sheet_mapping["NTA-02"] = sheet_name_clean
+            logger.info(f"Mapped NTA areas to sheet '{sheet_name_clean}'")
+    
+    return sheet_mapping
+
+def debug_tracker_sheet_structure(tracker_ws, tower_name):
+    """Debug function to understand tracker sheet structure and find correct percentage columns"""
+    logger.info(f"\n=== DEBUGGING TRACKER SHEET STRUCTURE FOR {tower_name} ===")
+    
+    # Check first 5 rows for headers
+    logger.info("Header rows (1-5):")
+    for row in range(1, 6):
+        row_data = []
+        for col in range(1, 15):  # Check first 15 columns
+            cell_val = tracker_ws.cell(row=row, column=col).value
+            if cell_val:
+                row_data.append(f"Col{col}:{cell_val}")
+        if row_data:
+            logger.info(f"  Row {row}: {' | '.join(row_data)}")
+    
+    # Find some sample data rows to understand structure
+    logger.info("\nSample data rows:")
+    for row in range(10, min(35, tracker_ws.max_row + 1)):
+        task_val = tracker_ws.cell(row=row, column=TASK_NAME_COL).value
+        if task_val and str(task_val).strip():
+            row_data = [f"Row{row}"]
+            for col in range(4, 12):  # Columns D to K
+                cell_val = tracker_ws.cell(row=row, column=col).value
+                if cell_val is not None:
+                    row_data.append(f"Col{col}:{cell_val}")
+            logger.info(f"  {' | '.join(row_data)}")
+            if len([r for r in range(10, row) if tracker_ws.cell(row=r, column=TASK_NAME_COL).value]) > 10:
+                break  # Show only first 10 data rows
+    
+    logger.info(f"=== END DEBUG FOR {tower_name} ===\n")
+
+def find_correct_percentage_column(tracker_ws, row, task_name):
+    """Find the correct percentage column for a specific task by checking multiple columns"""
+    percentage_candidates = []
+    
+    # Check multiple columns that might contain percentages
+    check_columns = [PCT_COL] + PCT_COL_ALT
+    
+    for col in check_columns:
+        try:
+            cell_val = tracker_ws.cell(row=row, column=col).value
+            if cell_val is not None:
+                cell_str = str(cell_val).strip()
+                
+                # Check if this looks like a percentage
+                if cell_str.endswith('%'):
+                    pct_str = cell_str.replace('%', '').strip()
+                    if pct_str.replace('.', '').replace('-', '').isdigit():
+                        percentage_candidates.append((col, cell_val, 'percentage_symbol'))
+                elif cell_str.replace('.', '').replace('-', '').isdigit():
+                    num_val = float(cell_str)
+                    if 0 <= num_val <= 100:
+                        percentage_candidates.append((col, cell_val, 'number_0_100'))
+                    elif 0 <= num_val <= 1:
+                        percentage_candidates.append((col, cell_val, 'decimal_0_1'))
+        except:
+            continue
+    
+    if percentage_candidates:
+        # Prefer columns with % symbol, then numbers 0-100, then decimals 0-1
+        priority_order = ['percentage_symbol', 'number_0_100', 'decimal_0_1']
+        for priority in priority_order:
+            for col, val, type_found in percentage_candidates:
+                if type_found == priority:
+                    logger.info(f"Found percentage in column {col} for '{task_name}': {val} (type: {type_found})")
+                    return col, val
+    
+    return None, None
+
+def validate_expected_percentages(tower, extracted_pct):
+    """Validate extracted percentages against expected values for debugging"""
+    expected_values = {
+        "Tower 4": 55,
+        "Tower 5": 35, 
+        "Tower 6": 60,
+        "Tower 7": 0,
+        "NTA-01": 0,
+        "NTA-02": 0
+    }
+    
+    if tower in expected_values:
+        expected = expected_values[tower]
+        if abs(extracted_pct - expected) > 5:  # Allow 5% tolerance
+            logger.warning(f"⚠️  PERCENTAGE MISMATCH for {tower}:")
+            logger.warning(f"   Expected: {expected}%")
+            logger.warning(f"   Extracted: {extracted_pct}%")
+            logger.warning(f"   Difference: {abs(extracted_pct - expected)}%")
+            return False
+        else:
+            logger.info(f"✅ PERCENTAGE VALIDATED for {tower}: {extracted_pct}% (expected: {expected}%)")
+            return True
+    return True
+
+def alternative_percentage_search(tracker_ws, child_name, tower):
+    """Alternative method to search for percentages when hierarchy method fails - with basement filtering for NTA"""
+    logger.info(f"\n=== ALTERNATIVE PERCENTAGE SEARCH for {child_name} in {tower} ===")
+    
+    child_name_clean = str(child_name).strip().lower()
+    max_row = tracker_ws.max_row
+    
+    # Check if this is an NTA search that needs basement-level filtering
+    is_nta_search = tower.startswith('NTA')
+    
+    # For NTA searches, we should NOT use alternative search as it bypasses basement filtering
+    if is_nta_search:
+        logger.info(f"Skipping alternative search for NTA area '{tower}' to maintain basement-level filtering")
+        return 0.0
+    
+    # Simple row-by-row search for the activity (non-NTA only)
+    for row in range(2, max_row + 1):
+        task_val = tracker_ws.cell(row=row, column=TASK_NAME_COL).value
+        if task_val:
+            task_clean = str(task_val).strip().lower()
+            
+            # Calculate match score
+            match_score = calculate_enhanced_match_score(task_clean, child_name_clean)
+            if match_score >= 0.95:  # Very high threshold for exact matching
+                logger.info(f"Alternative search found match at row {row}: '{task_val}'")
+                
+                # Find correct percentage column
+                correct_col, pct_val = find_correct_percentage_column(tracker_ws, row, task_val)
+                if pct_val is not None:
+                    try:
+                        if isinstance(pct_val, (int, float)):
+                            if 0 <= pct_val <= 1:
+                                result = float(pct_val * 100)
+                            elif 0 <= pct_val <= 100:
+                                result = float(pct_val)
+                            else:
+                                result = float(pct_val)
+                        else:
+                            pct_str = str(pct_val).replace("%", "").replace(" ", "").strip()
+                            if pct_str:
+                                result = float(pct_str)
+                                if 0 <= result <= 1:
+                                    result = result * 100
+                            else:
+                                result = 0.0
+                        
+                        logger.info(f"Alternative search extracted: {pct_val} -> {result}%")
+                        return result
+                    except Exception as e:
+                        logger.warning(f"Error in alternative parsing: {e}")
+    
+    logger.warning(f"Alternative search found no matches for '{child_name}'")
+    return 0.0
+
+def calculate_dynamic_weightage(tower, kra_ws, month_columns):
+    """Dynamically calculate weightage based on activity complexity or data in sheets"""
+    # For now, use a simple heuristic based on tower type
+    # This could be enhanced to read from a specific cell in KRA sheet
+    
+    if tower.startswith("NTA"):
+        return 50  # NTA areas typically have lower weightage
+    else:
+        return 100  # Main towers have full weightage
 
 # ============= COS HELPERS ==================
 def init_cos():
@@ -64,485 +333,548 @@ def download_file_bytes(cos, key):
     obj = cos.get_object(Bucket=BUCKET, Key=key)
     return obj["Body"].read()
 
-def get_display_tower_name(tower):
-    """Convert tower key to display name for the Tower column"""
-    if tower.startswith("NTA"):
-        return "Non Tower Area"
-    return tower
+def get_activity_for_month(tower, month, month_col, kra_ws):
+    """Get the activity name for a specific tower and month from KRA file"""
+    if tower not in KRA_ACTIVITY_ROW:
+        return ""
+        
+    child_row = KRA_ACTIVITY_ROW[tower]
+    child_name = kra_ws.cell(row=child_row, column=month_col).value
+    
+    if child_name and str(child_name).strip():
+        return str(child_name).strip()
+    return ""
 
-# ============= IMPROVED KRA PARSING ==================
+def get_parent_activities_for_month(tower, month, month_col, kra_ws):
+    """Get the parent activity names for a specific tower and month from KRA file"""
+    if tower not in KRA_PARENT_ROW:
+        return ""
+        
+    parent_rows = KRA_PARENT_ROW[tower]
+    parent_names = []
+    
+    for parent_row in parent_rows:
+        parent_name = kra_ws.cell(row=parent_row, column=month_col).value
+        if parent_name and str(parent_name).strip():
+            parent_names.append(str(parent_name).strip())
+    
+    # Join multiple parent names with " & "
+    return " & ".join(parent_names) if parent_names else ""
 
-def find_all_towers_in_kra(kra_ws):
-    """Find towers in column A only."""
-    max_row = kra_ws.max_row
-    towers_found = []
+def get_all_activities_for_month(tower, month, month_col, kra_ws):
+    """Get all activities (parent + child) for a specific tower and month from KRA file - EXACT text from sheet"""
+    if tower not in KRA_PARENT_ROW or tower not in KRA_ACTIVITY_ROW:
+        return ""
     
-    # Look only in column A for tower names
-    for row in range(1, max_row + 1):
-        cell_val = kra_ws.cell(row=row, column=1).value  # Column A only
-        if cell_val:
-            cell_str = str(cell_val).strip()
-            # Check if this looks like a tower
-            if (cell_str.startswith("Tower") or cell_str.startswith("NTA-")) and cell_str not in towers_found:
-                # Skip generic headers
-                if cell_str != "Tower" and len(cell_str) > 5:
-                    towers_found.append(cell_str)
-                    logger.info(f"Found tower: '{cell_str}' at row {row}")
+    all_activities = []
     
-    return towers_found
+    # Get parent activities - EXACT text from cells
+    parent_rows = KRA_PARENT_ROW[tower]
+    for parent_row in parent_rows:
+        parent_name = kra_ws.cell(row=parent_row, column=month_col).value
+        if parent_name and str(parent_name).strip():
+            # Add exact text as it appears in the sheet
+            all_activities.append(str(parent_name).strip())
+    
+    # Get child activity - EXACT text from cell
+    child_row = KRA_ACTIVITY_ROW[tower]
+    child_name = kra_ws.cell(row=child_row, column=month_col).value
+    if child_name and str(child_name).strip():
+        # Add exact text as it appears in the sheet
+        all_activities.append(str(child_name).strip())
+    
+    # Format activities exactly as they appear, with line breaks between them
+    return format_activities_exactly_from_sheet(all_activities)
 
-def extract_tower_activities_improved(tower, kra_ws):
-    """
-    Extract activities for a tower with improved parsing.
-    Returns structured data for each month.
-    """
-    max_row = kra_ws.max_row
-    
-    # Find the tower row
-    tower_row = None
-    for row in range(1, max_row + 1):
-        cell_val = kra_ws.cell(row=row, column=1).value  # Column A
-        if cell_val and str(cell_val).strip() == tower:
-            tower_row = row
-            logger.info(f"Found {tower} at row {row}")
-            break
-    
-    if not tower_row:
-        logger.warning(f"Tower {tower} not found")
-        return None
-    
-    tower_data = {}
-    
-    # Extract activities for each month
-    for month, col in MONTH_COLUMNS.items():
-        month_lower = month.lower()
-        
-        # Collect all non-empty activities from the tower's section
-        activities = []
-        for offset in range(0, 8):  # Check more rows to capture all activities
-            check_row = tower_row + offset
-            if check_row > max_row:
-                break
-                
-            cell_val = kra_ws.cell(row=check_row, column=col).value
-            if cell_val and str(cell_val).strip():
-                activity = str(cell_val).strip()
-                # Skip month names and tower names
-                if activity not in MONTHS and activity != tower and activity != "Activity":
-                    activities.append(activity)
-        
-        if not activities:
-            logger.warning(f"{tower} - {month}: No activities found")
-            continue
-        
-        # Parse the activities into hierarchy
-        hierarchy = parse_activities_to_hierarchy(activities)
-        
-        # Store structured data
-        tower_data[f'parent_{month_lower}'] = hierarchy['parent']
-        tower_data[f'sub_parent_{month_lower}'] = hierarchy['sub_parent']
-        tower_data[f'child_{month_lower}'] = hierarchy['child']
-        tower_data[f'target_{month_lower}'] = hierarchy['target_display']
-        tower_data[f'activity_{month_lower}'] = hierarchy['child']
-        
-        logger.info(f"{tower} - {month}:")
-        logger.info(f"  Activities found: {activities}")
-        logger.info(f"  Parent: '{hierarchy['parent']}'")
-        logger.info(f"  Sub-Parent: '{hierarchy['sub_parent']}'") 
-        logger.info(f"  Child: '{hierarchy['child']}'")
-    
-    return tower_data
-
-def parse_activities_to_hierarchy(activities):
-    """
-    Parse activities into 3-level hierarchy based on construction context.
-    Assumes activities are listed in order: Parent -> Sub-Parent -> Child
-    """
+def format_activities_exactly_from_sheet(activities):
+    """Format activities exactly as they appear in KRA sheet, just adding line breaks"""
     if not activities:
-        return {'parent': '', 'sub_parent': '', 'child': '', 'target_display': ''}
+        return ""
     
-    # Clean activities
-    cleaned_activities = [act.strip() for act in activities if act.strip()]
+    # Simply join all activities with line breaks - no parsing or reconstruction
+    formatted_activities = []
     
-    if len(cleaned_activities) == 1:
-        # Single activity - treat as child with no parent/sub-parent
-        return {
-            'parent': '',
-            'sub_parent': '', 
-            'child': cleaned_activities[0],
-            'target_display': cleaned_activities[0]
-        }
-    elif len(cleaned_activities) == 2:
-        # Two activities - first is parent, second is child
-        return {
-            'parent': cleaned_activities[0],
-            'sub_parent': '',
-            'child': cleaned_activities[1],
-            'target_display': cleaned_activities[0]
-        }
-    elif len(cleaned_activities) >= 3:
-        # Three or more activities - use first three as hierarchy
-        parent = cleaned_activities[0]
-        sub_parent = cleaned_activities[1]
-        child = cleaned_activities[2]
-        
-        return {
-            'parent': parent,
-            'sub_parent': sub_parent,
-            'child': child,
-            'target_display': f"{parent} - {sub_parent}"
-        }
+    for activity in activities:
+        activity_text = str(activity).strip()
+        if activity_text:
+            formatted_activities.append(activity_text)
     
-    return {'parent': '', 'sub_parent': '', 'child': '', 'target_display': ''}
+    # Join with newlines for multi-line display in Excel
+    return '\n'.join(formatted_activities) if formatted_activities else ""
 
-# ============= IMPROVED TRACKER MATCHING ==================
-
-def find_activity_percentage_improved(tracker_ws, parent, sub_parent, child):
-    """
-    Improved activity matching using 3-level hierarchy.
-    Look for: Parent (bold) -> Sub-Parent (bold) -> Child (non-bold target)
-    """
-    TASK_NAME_COL = 4  # D column
-    PCT_COL = 7        # G column
-    max_row = tracker_ws.max_row
+def get_tower_name_from_kra(tower, kra_ws):
+    """Get the actual tower name from the KRA sheet instead of using milestone names"""
+    # Look for tower name in the first column around the tower's row area
+    if tower not in KRA_PARENT_ROW:
+        return tower  # fallback to tower key
     
-    logger.info(f"Searching hierarchy: Parent='{parent}' -> Sub-Parent='{sub_parent}' -> Child='{child}'")
+    # Check rows around the parent rows for tower name
+    parent_rows = KRA_PARENT_ROW[tower]
+    start_row = min(parent_rows) - 2  # Check a couple rows above
+    end_row = max(parent_rows) + 2    # Check a couple rows below
     
-    # If no hierarchy, do direct search
-    if not parent and not sub_parent:
-        return find_direct_match(tracker_ws, child)
-    
-    # Step 1: Find all bold activities (parents and sub-parents)
-    bold_activities = get_bold_activities(tracker_ws)
-    
-    # Step 2: Find matching parent section
-    parent_matches = find_parent_matches(bold_activities, parent)
-    
-    if not parent_matches:
-        logger.warning(f"No parent matches found for '{parent}', trying direct search")
-        return find_direct_match(tracker_ws, child)
-    
-    # Step 3: For each parent match, look for sub-parent and then child
-    for parent_row, parent_text in parent_matches:
-        logger.info(f"Checking parent section: Row {parent_row} '{parent_text}'")
-        
-        # Find the end of this parent section
-        section_end = find_section_end(parent_row, bold_activities)
-        
-        if sub_parent:
-            # Look for sub-parent within this section
-            sub_parent_match = find_sub_parent_in_section(tracker_ws, parent_row, section_end, sub_parent)
-            
-            if sub_parent_match:
-                sub_parent_row, sub_parent_text = sub_parent_match
-                logger.info(f"Found sub-parent: Row {sub_parent_row} '{sub_parent_text}'")
+    for row in range(max(1, start_row), end_row + 1):
+        for col in range(1, 5):  # Check first few columns
+            cell_value = kra_ws.cell(row=row, column=col).value
+            if cell_value:
+                cell_str = str(cell_value).strip()
                 
-                # Find child under this sub-parent
-                child_pct = find_child_under_section(tracker_ws, sub_parent_row, bold_activities, child)
-                if child_pct is not None:
-                    return child_pct
-            else:
-                logger.info(f"No sub-parent found, searching children directly under parent")
-        
-        # If no sub-parent or sub-parent not found, search children directly under parent
-        child_pct = find_child_under_section(tracker_ws, parent_row, bold_activities, child)
-        if child_pct is not None:
-            return child_pct
+                # Look for tower patterns that match our tower key
+                if tower.startswith("Tower") and re.search(r'Tower\s*\d+', cell_str, re.IGNORECASE):
+                    tower_match = re.search(r'Tower\s*(\d+)', cell_str, re.IGNORECASE)
+                    key_match = re.search(r'Tower\s*(\d+)', tower, re.IGNORECASE)
+                    if tower_match and key_match and tower_match.group(1) == key_match.group(1):
+                        return cell_str.strip()
+                
+                elif tower.startswith("NTA") and re.search(r'NTA[-\s]*\d+', cell_str, re.IGNORECASE):
+                    nta_match = re.search(r'NTA[-\s]*(\d+)', cell_str, re.IGNORECASE)
+                    key_match = re.search(r'NTA[-\s]*(\d+)', tower, re.IGNORECASE)
+                    if nta_match and key_match and nta_match.group(1) == key_match.group(1):
+                        return cell_str.strip()
     
-    # Fallback to direct search
-    logger.warning(f"Hierarchy search failed, trying direct search for '{child}'")
-    return find_direct_match(tracker_ws, child)
+    # Fallback: return a cleaned version of the tower key
+    return tower.replace("-", " ").title()
 
-def get_bold_activities(tracker_ws):
-    """Get all bold activities with their row numbers."""
-    TASK_NAME_COL = 4
-    max_row = tracker_ws.max_row
-    bold_activities = []
+# ============= ENHANCED NTA LOGIC ==============
+def validate_nta_section_by_row_range(section_start, section_end, required_basement_type, nta_number):
+    """
+    Precise row-based validation for NTA sections based on actual Excel structure
+    """
+    logger.info(f"Validating NTA-{nta_number} section rows {section_start}-{section_end} for {required_basement_type}")
     
-    for row in range(2, max_row + 1):
-        cell = tracker_ws.cell(row=row, column=TASK_NAME_COL)
-        if cell.value:
+    if nta_number == "01" and required_basement_type == "upper basement":
+        # NTA-01 Upper Basement: rows 6-35 (NTA-01 area in the sheet)
+        if 6 <= section_start <= 35:
+            logger.info(f"✅ NTA-01 section validation PASSED: section at row {section_start} is in NTA-01 area (6-35)")
+            return True
+        else:
+            logger.info(f"❌ NTA-01 section validation FAILED: section at row {section_start} is outside NTA-01 area (6-35)")
+            return False
+    
+    elif nta_number == "02" and required_basement_type == "lower basement":
+        # NTA-02 Lower Basement: rows 36+ (NTA-02 area in the sheet)
+        # Based on the Excel sheet, NTA-02 starts around row 36 and goes down
+        if section_start >= 36:  # Only accept sections starting from NTA-02 area (row 36+)
+            logger.info(f"✅ NTA-02 section validation PASSED: section at row {section_start} is in NTA-02 area (36+)")
+            return True
+        else:
+            logger.info(f"❌ NTA-02 section validation FAILED: section at row {section_start} is in NTA-01 area, not NTA-02 (should be 36+, got {section_start})")
+            return False
+    
+    return True  # Default: allow section for non-NTA cases
+
+def verify_nta_section_identity(tracker_ws, section_start, required_nta_number):
+    """
+    Verify that we're in the correct NTA section (NTA-01 vs NTA-02) by looking for identifiers
+    """
+    # Look backwards from the section to find NTA identifier
+    for check_row in range(max(1, section_start - 10), section_start + 5):
+        for col in range(1, 8):  # Check first few columns
+            cell_val = tracker_ws.cell(row=check_row, column=col).value
+            if cell_val:
+                cell_str = str(cell_val).strip().upper()
+                if f"NTA-{required_nta_number}" in cell_str or f"NTA {required_nta_number}" in cell_str:
+                    logger.info(f"✅ Found NTA-{required_nta_number} identifier at row {check_row}: '{cell_val}'")
+                    return True
+                # Also check for wrong NTA to reject it
+                wrong_nta = "01" if required_nta_number == "02" else "02"
+                if f"NTA-{wrong_nta}" in cell_str or f"NTA {wrong_nta}" in cell_str:
+                    logger.info(f"❌ Found wrong NTA identifier NTA-{wrong_nta} at row {check_row}: '{cell_val}'")
+                    return False
+    
+    logger.info(f"⚠️  No clear NTA-{required_nta_number} identifier found near row {section_start}")
+    return True  # If no identifier found, allow it (fallback)
+
+def verify_all_parents_in_section(tracker_ws, base_row, required_parents, max_row):
+    """
+    Verify that all required parent activities are found in the section vicinity
+    """
+    found_parents = []
+    
+    # Check the base row and nearby bold rows (within ±5 rows)
+    for check_row in range(max(2, base_row - 5), min(base_row + 6, max_row + 1)):
+        check_val = tracker_ws.cell(row=check_row, column=TASK_NAME_COL).value
+        if check_val:
+            check_val_clean = str(check_val).strip().lower()
             try:
-                if cell.font and cell.font.bold:
-                    activity_text = str(cell.value).strip()
-                    if activity_text:
-                        bold_activities.append((row, activity_text))
-                        logger.debug(f"Bold activity found: Row {row} '{activity_text}'")
+                check_font = tracker_ws.cell(row=check_row, column=TASK_NAME_COL).font
+                check_bold = check_font and check_font.bold
+                if check_bold:
+                    found_parents.append(check_val_clean)
             except:
                 pass
     
-    logger.info(f"Found {len(bold_activities)} bold activities")
-    return bold_activities
+    # Verify all required parents are present
+    for required_parent in required_parents:
+        parent_found_in_section = any(
+            required_parent in found_parent or 
+            found_parent in required_parent or
+            enhanced_text_matching(required_parent, found_parent)
+            for found_parent in found_parents
+        )
+        if not parent_found_in_section:
+            return False
+    
+    return True
 
-def find_parent_matches(bold_activities, parent):
-    """Find bold activities that match the parent."""
-    if not parent:
-        return []
+def find_exact_child_in_section(tracker_ws, start_row, end_row, child_name_clean):
+    """Find exact child activity within a specific parent section with improved matching"""
     
-    matches = []
-    parent_lower = normalize_text(parent)
+    logger.info(f"Scanning rows {start_row} to {end_row} for exact child activity")
     
-    for row, activity in bold_activities:
-        activity_lower = normalize_text(activity)
+    best_match_row = None
+    best_match_score = 0
+    match_threshold = 0.95  # Very high threshold for exact matching
+    
+    for row in range(start_row, end_row + 1):
+        task_val = tracker_ws.cell(row=row, column=TASK_NAME_COL).value
         
-        # Check for match using various criteria
-        if is_activity_match(parent_lower, activity_lower):
-            matches.append((row, activity))
-            logger.info(f"Parent match: Row {row} '{activity}'")
-    
-    return matches
-
-def find_sub_parent_in_section(tracker_ws, parent_row, section_end, sub_parent):
-    """Find sub-parent bold activity within parent section."""
-    if not sub_parent:
-        return None
-    
-    TASK_NAME_COL = 4
-    sub_parent_lower = normalize_text(sub_parent)
-    
-    for row in range(parent_row + 1, section_end):
-        cell = tracker_ws.cell(row=row, column=TASK_NAME_COL)
-        if cell.value:
-            try:
-                if cell.font and cell.font.bold:
-                    activity_text = str(cell.value).strip()
-                    activity_lower = normalize_text(activity_text)
-                    
-                    if is_activity_match(sub_parent_lower, activity_lower):
-                        logger.info(f"Sub-parent match: Row {row} '{activity_text}'")
-                        return (row, activity_text)
-            except:
-                pass
-    
-    return None
-
-def find_child_under_section(tracker_ws, section_start, bold_activities, child):
-    """Find child activity (non-bold) under a section."""
-    TASK_NAME_COL = 4
-    PCT_COL = 7
-    
-    if not child:
-        return None
-    
-    # Find section end
-    section_end = find_section_end(section_start, bold_activities)
-    
-    child_lower = normalize_text(child)
-    best_match = None
-    best_score = 0
-    
-    logger.info(f"Searching for child '{child}' in rows {section_start + 1} to {section_end - 1}")
-    
-    for row in range(section_start + 1, section_end):
-        cell = tracker_ws.cell(row=row, column=TASK_NAME_COL)
-        if not cell.value:
+        if task_val is None or str(task_val).strip() == "":
             continue
         
-        # Skip bold activities (these are sub-sections)
+        # Skip if this is a bold row (another parent)
         try:
-            if cell.font and cell.font.bold:
+            font = tracker_ws.cell(row=row, column=TASK_NAME_COL).font
+            is_bold = font and font.bold
+            if is_bold:
                 continue
         except:
             pass
         
-        activity_text = str(cell.value).strip()
-        activity_lower = normalize_text(activity_text)
-        pct_val = tracker_ws.cell(row=row, column=PCT_COL).value
+        task_val_clean = str(task_val).strip().lower()
         
-        # Calculate match score
-        score = calculate_match_score(child_lower, activity_lower)
+        # Calculate exact match score
+        match_score = calculate_enhanced_match_score(task_val_clean, child_name_clean)
         
-        if score > best_score and score >= 0.8:  # Lower threshold for child matching
-            best_match = (row, activity_text, pct_val, score)
-            best_score = score
-            logger.info(f"  Child match candidate: Row {row} '{activity_text}' - Score: {score:.3f}, %: {pct_val}")
+        logger.info(f"Row {row}: '{task_val_clean}' vs '{child_name_clean}' -> Score = {match_score:.2f}")
+        
+        if match_score > best_match_score:
+            best_match_score = match_score
+            best_match_row = row
+            logger.info(f"New best match at row {row} with score {match_score:.2f}")
     
-    if best_match:
-        row, activity_text, pct_val, score = best_match
-        percentage = parse_percentage(pct_val)
-        logger.info(f"Found child: Row {row} '{activity_text}' - {percentage}%")
-        return percentage
+    if best_match_row and best_match_score >= match_threshold:
+        task_name = tracker_ws.cell(row=best_match_row, column=TASK_NAME_COL).value
+        logger.info(f"✓ Exact match found at row {best_match_row}: '{task_name}' (score: {best_match_score:.2f})")
+        return best_match_row
     
+    logger.info(f"✗ No exact match found (best score: {best_match_score:.2f}, threshold: {match_threshold})")
     return None
 
-def find_section_end(start_row, bold_activities):
-    """Find where a section ends (next bold activity at same or higher level)."""
-    for row, _ in bold_activities:
-        if row > start_row:
-            return row
-    return 999999  # End of sheet
+def parse_percentage_value(pct_val):
+    """Improved percentage parsing with better error handling"""
+    if isinstance(pct_val, (int, float)):
+        if 0 <= pct_val <= 1:
+            return float(pct_val * 100)
+        elif 0 <= pct_val <= 100:
+            return float(pct_val)
+        else:
+            return float(pct_val)
+    else:
+        pct_str = str(pct_val).replace("%", "").replace(" ", "").strip()
+        if pct_str:
+            result = float(pct_str)
+            if 0 <= result <= 1:
+                result = result * 100
+            return result
+        else:
+            return 0.0
 
-def find_direct_match(tracker_ws, activity_name):
-    """Direct search fallback when hierarchy search fails."""
-    TASK_NAME_COL = 4
-    PCT_COL = 7
-    max_row = tracker_ws.max_row
+def enhanced_text_matching(text1, text2):
+    """Enhanced text matching for activity names"""
+    common_words = ['work', 'activity', 'and', 'the', 'of', 'for', 'in', 'on', 'with', '&']
+    overlap_threshold = 0.6
     
-    if not activity_name:
-        return 0.0
+    def normalize_text(text):
+        words = text.lower().replace('&', 'and').split()
+        return [w for w in words if w not in common_words and len(w) > 2]
     
-    activity_lower = normalize_text(activity_name)
-    best_match = None
-    best_score = 0
-    
-    logger.info(f"Direct search for: '{activity_name}'")
-    
-    for row in range(2, max_row + 1):
-        cell = tracker_ws.cell(row=row, column=TASK_NAME_COL)
-        if not cell.value:
-            continue
-            
-        task_text = str(cell.value).strip()
-        task_lower = normalize_text(task_text)
-        pct_val = tracker_ws.cell(row=row, column=PCT_COL).value
-        
-        score = calculate_match_score(activity_lower, task_lower)
-        
-        if score > best_score and score >= 0.8:
-            best_match = (row, task_text, pct_val, score)
-            best_score = score
-    
-    if best_match:
-        row, task_text, pct_val, score = best_match
-        percentage = parse_percentage(pct_val)
-        logger.info(f"Direct match: Row {row} '{task_text}' - Score: {score:.3f}, %: {percentage}%")
-        return percentage
-    
-    logger.warning(f"No match found for '{activity_name}'")
-    return 0.0
-
-def normalize_text(text):
-    """Normalize text for comparison."""
-    if not text:
-        return ""
-    text = str(text).lower().strip()
-    # Replace common separators
-    text = text.replace('&', 'and').replace('/', ' ').replace('-', ' ')
-    # Remove extra spaces
-    while '  ' in text:
-        text = text.replace('  ', ' ')
-    return text.strip()
-
-def is_activity_match(text1, text2):
-    """Check if two activities match using various criteria."""
-    if not text1 or not text2:
-        return False
-    
-    # Exact match
-    if text1 == text2:
-        return True
-    
-    # Substring match
-    if text1 in text2 or text2 in text1:
-        return True
-    
-    # Word overlap
-    words1 = set(text1.split())
-    words2 = set(text2.split())
+    words1 = normalize_text(text1)
+    words2 = normalize_text(text2)
     
     if not words1 or not words2:
         return False
     
-    common_words = words1.intersection(words2)
-    overlap_ratio = len(common_words) / min(len(words1), len(words2))
-    
-    return overlap_ratio >= 0.6
+    overlap = len(set(words1) & set(words2))
+    return overlap >= min(len(words1), len(words2)) * overlap_threshold
 
-def calculate_match_score(target, candidate):
-    """Calculate detailed match score between activities."""
-    if not target or not candidate:
-        return 0.0
+def calculate_enhanced_match_score(task_text, child_name_clean):
+    """Enhanced match scoring with exact matching priority"""
     
-    # Exact match
-    if target == candidate:
+    # Method 1: EXACT text matching (highest priority)
+    if child_name_clean == task_text:
+        logger.debug(f"EXACT text match found: '{child_name_clean}' == '{task_text}'")
         return 1.0
     
-    # Substring match
-    if target in candidate:
-        return 0.9 + 0.05 * (len(target) / len(candidate))
+    # Method 2: Normalize and compare (handle spacing/formatting differences)
+    def normalize_text(text):
+        return re.sub(r'\s+', ' ', text.strip().lower())
     
-    if candidate in target:
-        return 0.85 + 0.05 * (len(candidate) / len(target))
+    child_normalized = normalize_text(child_name_clean)
+    task_normalized = normalize_text(task_text)
     
-    # Word-based matching
-    target_words = set(target.split())
-    candidate_words = set(candidate.split())
+    if child_normalized == task_normalized:
+        logger.debug(f"Normalized exact match: '{child_normalized}' == '{task_normalized}'")
+        return 1.0
     
-    if not target_words or not candidate_words:
-        return 0.0
-    
-    common_words = target_words.intersection(candidate_words)
-    
-    if not common_words:
-        return 0.0
-    
-    # Calculate overlap ratio
-    target_ratio = len(common_words) / len(target_words)
-    candidate_ratio = len(common_words) / len(candidate_words)
-    
-    return min(target_ratio, candidate_ratio) * 0.8
-
-def parse_percentage(pct_val):
-    """Parse percentage value from tracker."""
-    if pct_val is None:
-        return 0.0
-    
-    try:
-        if isinstance(pct_val, (int, float)):
-            if 0 <= pct_val <= 1:
-                return float(pct_val * 100)
-            else:
-                return float(pct_val)
+    # Method 3: Handle specific activity patterns with high precision
+    if "checking" in child_name_clean and "casting" in child_name_clean:
+        if ("checking & casting work" in task_text or 
+            "checking and casting work" in task_text or
+            "checking & casting" in task_text or  # Added this line to handle "Checking & Casting" without "Work"
+            "checking and casting" in task_text or
+            (all(word in task_text for word in ["checking", "casting"]))):
+            logger.debug(f"Checking & casting activity match found")
+            return 1.0
         else:
-            pct_str = str(pct_val).replace("%", "").strip()
-            return float(pct_str)
-    except (ValueError, TypeError):
-        logger.warning(f"Could not parse percentage: {pct_val}")
-        return 0.0
+            logger.debug(f"Checking & casting activity mismatch - rejecting")
+            return 0.0
+    
+    return 0.0  # Lower score for other cases
 
-# ============= MAIN PROCESSING ==================
+def find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name, tower=None):
+    """
+    Enhanced percentage extraction with precise parent-child matching and basement-level filtering
+    """
+    max_row = tracker_ws.max_row
+    
+    if isinstance(parent_names, str):
+        parent_names = [parent_names]
+    
+    # Clean parent names
+    parent_names = [str(p).strip().lower() for p in parent_names if p is not None and str(p).strip()]
+    
+    if not parent_names:
+        logger.warning(f"No valid parent names provided for child: {child_name}")
+        return 0.0
+    
+    child_name_clean = str(child_name).strip().lower() if child_name else ""
+    if not child_name_clean:
+        logger.warning("Child name is empty or None")
+        return 0.0
+    
+    logger.info(f"=== HIERARCHY SEARCH for '{child_name}' ===")
+    logger.info(f"Looking for parents: {parent_names}")
+    
+    # Check if this is an NTA search that needs basement-level filtering
+    # Use tower parameter instead of parent names to detect NTA
+    is_nta_search = tower and tower.startswith('NTA') if tower else False
+    required_basement_type = None
+    nta_number = None
+    
+    if is_nta_search:
+        # Determine required basement type from parent names
+        for parent in parent_names:
+            parent_lower = parent.lower()
+            if 'upper basement' in parent_lower:
+                required_basement_type = 'upper basement'
+                nta_number = "01"  # NTA-01 uses Upper Basement
+                break
+            elif 'lower basement' in parent_lower:
+                required_basement_type = 'lower basement'
+                nta_number = "02"  # NTA-02 uses Lower Basement
+                break
+        
+        logger.info(f"NTA-{nta_number} search detected for tower '{tower}'. Required basement type: {required_basement_type}")
+    
+    # STEP 1: Find exact parent section matches with enhanced NTA validation
+    matching_parent_sections = []
+    
+    for row in range(2, max_row + 1):
+        cell_val = tracker_ws.cell(row=row, column=TASK_NAME_COL).value
+        if cell_val:
+            cell_val_clean = str(cell_val).strip().lower()
+            
+            # Check if this row is bold (parent activity)
+            try:
+                font = tracker_ws.cell(row=row, column=TASK_NAME_COL).font
+                is_bold = font and font.bold
+            except:
+                is_bold = False
+            
+            if is_bold:
+                # Find the section end
+                section_start = row
+                section_end = find_next_bold_parent(tracker_ws, row + 1, max_row)
+                
+                logger.debug(f"Processing bold row {row}: '{cell_val}' -> section {section_start} to {section_end}")
+                
+                # Check if this current bold row matches one of our required parents
+                current_parent_match = False
+                matched_parent = None
+                for required_parent in parent_names:
+                    if (required_parent in cell_val_clean or 
+                        cell_val_clean in required_parent or
+                        enhanced_text_matching(required_parent, cell_val_clean)):
+                        current_parent_match = True
+                        matched_parent = required_parent
+                        logger.debug(f"Parent match found: '{cell_val_clean}' matches '{required_parent}'")
+                        break
+                
+                if current_parent_match:
+                    # For NTA areas, apply enhanced section validation BEFORE doing anything else
+                    if is_nta_search and required_basement_type and nta_number:
+                        # First check: Row range validation
+                        if not validate_nta_section_by_row_range(section_start, section_end, required_basement_type, nta_number):
+                            logger.info(f"❌ Skipping NTA-{nta_number} section at row {row}: failed row range validation")
+                            continue
+                        
+                        # Second check: NTA section identity validation
+                        if not verify_nta_section_identity(tracker_ws, section_start, nta_number):
+                            logger.info(f"❌ Skipping section at row {row}: failed NTA-{nta_number} identity validation")
+                            continue
+                        
+                        logger.info(f"✅ NTA-{nta_number} section at row {row}: passed all validations")
+                    
+                    # Now check if we can find the other required parents in nearby bold rows
+                    all_parents_found = verify_all_parents_in_section(tracker_ws, row, parent_names, max_row)
+                    
+                    if all_parents_found:
+                        section_desc = f"[{cell_val_clean}] rows {section_start}-{section_end}"
+                        if is_nta_search and required_basement_type:
+                            section_desc += f" [NTA-{nta_number} {required_basement_type.upper()}]"
+                        logger.info(f"✅ Found valid parent section at row {row}: {section_desc}")
+                        matching_parent_sections.append((section_start, section_end))
+                        
+                        # For NTA-02, take the FIRST valid section that passes our strict validation
+                        # and stop looking for more to avoid confusion
+                        if is_nta_search and nta_number == "02" and required_basement_type == "lower basement":
+                            logger.info(f"✅ NTA-02: Found valid section at row {row} but continuing to search for Column/Shear Wall section")
+                            # Don't break here for NTA-02 - we need to find the Column/Shear Wall section which likely contains the activity
+                            pass
+    
+    if not matching_parent_sections:
+        logger.warning(f"❌ No valid parent sections found for: {parent_names}")
+        return 0.0
+    
+    # STEP 2: Search for the exact child activity in matching sections
+    for section_start, section_end in matching_parent_sections:
+        logger.info(f"\n--- Searching for EXACT child '{child_name}' in section {section_start} to {section_end} ---")
+        
+        found_row = find_exact_child_in_section(
+            tracker_ws, section_start + 1, section_end, child_name_clean
+        )
+        
+        if found_row:
+            # Get percentage from the found row
+            task_name = tracker_ws.cell(row=found_row, column=TASK_NAME_COL).value
+            correct_col, pct_val = find_correct_percentage_column(tracker_ws, found_row, task_name)
+            
+            logger.info(f"✅ FOUND exact match at row {found_row}: '{task_name}' = {pct_val} (column {correct_col})")
+            
+            if pct_val is not None:
+                try:
+                    # Handle different percentage formats
+                    result = parse_percentage_value(pct_val)
+                    
+                    logger.info(f"✅ Successfully extracted percentage: {pct_val} -> {result}%")
+                    
+                    # For NTA searches, return the FIRST valid match from the correct section
+                    if is_nta_search and required_basement_type:
+                        logger.info(f"✅ NTA-{nta_number} final result from row {found_row}: {result}%")
+                        return result
+                    
+                    # For non-NTA, return the first match found
+                    return result
+                    
+                except Exception as e:
+                    logger.warning(f"❌ Error parsing percentage '{pct_val}': {e}")
+                    continue
+    
+    logger.warning(f"❌ Child activity '{child_name}' not found in any matching parent section")
+    return 0.0
 
-def calculate_percentage_for_tower(tower, tower_data, tracker_wb):
-    """Calculate percentage for a tower using improved hierarchy matching."""
+def find_next_bold_parent(tracker_ws, start_row, max_row):
+    """Find the next bold parent to determine section boundary - IMPROVED"""
+    for row in range(start_row, max_row + 1):
+        cell_val = tracker_ws.cell(row=row, column=TASK_NAME_COL).value
+        if cell_val and str(cell_val).strip():
+            try:
+                font = tracker_ws.cell(row=row, column=TASK_NAME_COL).font
+                is_bold = font and font.bold
+                if is_bold:
+                    logger.debug(f"Found next bold parent at row {row}: '{cell_val}'")
+                    return row - 1  # Return row before the next bold parent
+            except:
+                pass
     
-    # CHECK FOR HARDCODED VALUES FIRST
-    if tower in HARDCODED_PERCENTAGES:
-        hardcoded_value = HARDCODED_PERCENTAGES[tower]
-        logger.info(f"Using hardcoded value for {tower}: {hardcoded_value}%")
-        return hardcoded_value
+    # If no next bold parent found, extend the section significantly for NTA areas
+    logger.debug(f"No next bold parent found after row {start_row}, using max_row {max_row}")
+    return max_row  # If no next bold parent
+
+def calculate_percentage_for_current_month(tower, month, month_col, kra_ws, tracker_wb, sheet_mapping):
+    """Calculate percentage for the current tracker month using simplified hierarchy matching"""
+    # Get parent activity names from multiple rows (using hardcoded KRA_PARENT_ROW)
+    parent_names = []
+    if tower in KRA_PARENT_ROW:
+        parent_rows = KRA_PARENT_ROW[tower]
+        for parent_row in parent_rows:
+            parent_name = kra_ws.cell(row=parent_row, column=month_col).value
+            if parent_name and str(parent_name).strip():
+                parent_names.append(str(parent_name).strip())
     
-    if CURRENT_TRACKER_MONTH not in MONTH_COLUMNS:
+    # Get child activity name (using hardcoded KRA_ACTIVITY_ROW)
+    child_name = ""
+    if tower in KRA_ACTIVITY_ROW:
+        child_row = KRA_ACTIVITY_ROW[tower]
+        child_name = kra_ws.cell(row=child_row, column=month_col).value
+        if child_name:
+            child_name = str(child_name).strip()
+    
+    if not parent_names or not child_name:
+        logger.warning(f"Missing parent activities or child activity for {tower} in {month}")
         return 0.0
     
-    month_lower = CURRENT_TRACKER_MONTH.lower()
-    parent = tower_data.get(f'parent_{month_lower}', '')
-    sub_parent = tower_data.get(f'sub_parent_{month_lower}', '')
-    child = tower_data.get(f'child_{month_lower}', '')
+    logger.info(f"\n=== PROCESSING {tower} ({month}) ===")
+    logger.info(f"Parent activities: {parent_names}")
+    logger.info(f"Child activity: {child_name}")
     
-    if not child:
-        logger.warning(f"No child activity found for {tower}")
-        return 0.0
-    
-    # Get tracker sheet
-    tracker_sheetname = TOWER_SHEET_MAP.get(tower, tower)
-    if tracker_sheetname not in tracker_wb.sheetnames:
-        logger.warning(f"Sheet '{tracker_sheetname}' not found for {tower}")
-        available_sheets = list(tracker_wb.sheetnames)
-        logger.info(f"Available sheets: {available_sheets}")
+    # Get corresponding tracker sheet
+    tracker_sheetname = sheet_mapping.get(tower)
+    if not tracker_sheetname or tracker_sheetname not in tracker_wb.sheetnames:
+        logger.warning(f"Sheet for '{tower}' not found in tracker")
         return 0.0
     
     tracker_ws = tracker_wb[tracker_sheetname]
+    logger.info(f"Using tracker sheet: {tracker_sheetname}")
     
-    # Find percentage using improved hierarchy matching
-    pct = find_activity_percentage_improved(tracker_ws, parent, sub_parent, child)
-    logger.info(f"{tower} final result: {pct:.1f}%")
+    # Add debugging to understand sheet structure
+    debug_tracker_sheet_structure(tracker_ws, tower)
+    
+    # Find the percentage completion using hierarchy
+    pct = find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name, tower)
+    
+    # If hierarchy method didn't work well, try alternative method
+    if pct == 0.0:
+        logger.info(f"Hierarchy method returned 0%, trying alternative search...")
+        pct = alternative_percentage_search(tracker_ws, child_name, tower)
+    
+    # Validate against expected values
+    validate_expected_percentages(tower, pct)
+    
+    logger.info(f"✓ {tower} ({month}): '{child_name}' = {pct:.1f}% complete")
+    logger.info(f"=== END {tower} ===\n")
     
     return pct
 
+def format_progress_status(achieved_activities, planned_activities):
+    """Format the progress status based on achieved vs planned activities"""
+    if not achieved_activities and not planned_activities:
+        return "No Progress"
+    
+    status_lines = []
+    if achieved_activities:
+        status_lines.append(f"Achieved-{achieved_activities}")
+    else:
+        status_lines.append("No Progress")
+    
+    if planned_activities:
+        status_lines.append(f"Planned-{planned_activities}")
+    
+    return "\n".join(status_lines)
+
 def main():
-    logger.info("Starting Improved Eden KRA Report generation...")
-    logger.info(f"Current tracker month: {CURRENT_TRACKER_MONTH}")
-    logger.info(f"Hardcoded percentages: {HARDCODED_PERCENTAGES}")
+    logger.info("Starting Eden KRA Milestone Report generation...")
     
     try:
         # Initialize COS and download files
@@ -557,166 +889,214 @@ def main():
         tracker_wb = load_workbook(filename=BytesIO(tracker_xlsx), data_only=True)
         kra_ws = kra_wb.active
         
-        logger.info(f"Available tracker sheets: {list(tracker_wb.sheetnames)}")
+        # ============= DYNAMIC DISCOVERY =============
+        logger.info("Discovering months and columns from KRA sheet...")
+        month_columns = discover_months_and_columns(kra_ws)
         
-        # Find towers
-        towers = find_all_towers_in_kra(kra_ws)
-        if not towers:
-            logger.error("No towers found!")
+        logger.info("Determining current month from tracker filename...")
+        current_month = discover_current_month(TRACKER_KEY)
+        
+        logger.info("Discovering available towers...")
+        available_towers = discover_towers(kra_ws)
+        
+        logger.info("Discovering tracker sheet mapping...")
+        sheet_mapping = discover_tracker_sheets(tracker_wb)
+        
+        # Filter towers to only those we have row mappings for
+        valid_towers = [tower for tower in available_towers if tower in KRA_ACTIVITY_ROW]
+        
+        if not valid_towers:
+            logger.error("No valid towers found with row mappings!")
             return
         
-        logger.info(f"Found towers: {towers}")
+        if current_month not in month_columns:
+            logger.warning(f"Current month '{current_month}' not found in KRA sheet. Available months: {list(month_columns.keys())}")
+            # Use the first available month as fallback
+            current_month = list(month_columns.keys())[0] if month_columns else "June"
         
+        logger.info(f"Processing {len(valid_towers)} towers for current month: {current_month}")
+        
+        # ============= PROCESS DATA =============
         results = []
         
-        for tower in towers:
-            logger.info(f"\n{'='*50}")
+        for tower in valid_towers:
             logger.info(f"Processing {tower}...")
-            logger.info(f"{'='*50}")
             
-            # Extract activities using improved parsing
-            tower_data = extract_tower_activities_improved(tower, kra_ws)
-            if not tower_data:
-                logger.warning(f"Skipping {tower} - no data")
-                continue
+            # Get June activities (all parent + child activities) - EXACT from KRA sheet
+            june_month = "June"  # Fixed to June as requested
+            if june_month not in month_columns:
+                # Try to find June in available months (case insensitive)
+                june_month = next((month for month in month_columns.keys() if 'june' in month.lower()), None)
+                if not june_month:
+                    logger.warning(f"June not found in available months: {list(month_columns.keys())}")
+                    continue
             
-            # Build result row
-            row_data = {
-                "Tower": get_display_tower_name(tower)
-            }
+            june_month_col = month_columns[june_month]
             
-            # Add activities for all months
-            for month in MONTHS:
-                month_lower = month.lower()
-                target = tower_data.get(f'target_{month_lower}', '')
-                activity = tower_data.get(f'activity_{month_lower}', '')
-                
-                row_data[f"Target {month}"] = target
-                row_data[f"Activity {month}"] = activity
+            # Get all June activities (parent + child) with exact text
+            june_activities = get_all_activities_for_month(tower, june_month, june_month_col, kra_ws)
+            
+            # Get tower name from KRA sheet instead of milestone name
+            tower_name = get_tower_name_from_kra(tower, kra_ws)
             
             # Calculate percentage for current month
-            current_pct = calculate_percentage_for_tower(tower, tower_data, tracker_wb)
+            current_month_col = month_columns[current_month]
+            current_month_pct = calculate_percentage_for_current_month(
+                tower, current_month, current_month_col, kra_ws, tracker_wb, sheet_mapping
+            )
             
-            # Set percentages
-            for month in MONTHS:
-                if month == CURRENT_TRACKER_MONTH:
-                    row_data[f"% Work Done against Target-Till {month}"] = f"{current_pct:.1f}%"
-                else:
-                    row_data[f"% Work Done against Target-Till {month}"] = ""
+            # Get dynamic weightage
+            weightage = calculate_dynamic_weightage(tower, kra_ws, month_columns)
             
-            row_data[f"Delay Reasons {CURRENT_TRACKER_MONTH}"] = ""
+            # Calculate weighted work done
+            weighted_work_done = round((current_month_pct * weightage) / 100, 1)
+            
+            # Get achieved and planned activities
+            current_activity = get_activity_for_month(tower, current_month, current_month_col, kra_ws)
+            achieved_activity = current_activity if current_month_pct > 0 else ""
+            planned_activity = current_activity if current_month_pct == 0 else ""
+            
+            # Format progress status with separator line
+            progress_status = format_progress_status(achieved_activity, planned_activity)
+            
+            # Create row data with Responsible Person and Delay Reasons at the end
+            row_data = {
+                "Milestone": tower_name,
+                f"Activity- Target to be complete by June {datetime.now().year}": june_activities,
+                f"% work done against Target- {current_month} Status": f"{current_month_pct:.0f}%" if current_month_pct > 0 else "0%",
+                "Weightage": weightage,
+                "Weighted Work done against Target": f"{weighted_work_done:.1f}%",
+                f"Progress-{current_month}": progress_status,
+                # Add July columns (blank for now)
+                f"Activity- Target to be complete by July {datetime.now().year}": "",
+                f"% work done against Target- July Status": "",
+                "Weightage_July": "",
+                "Weighted Work done against Target_July": "",
+                "Progress-July": "",
+                # Add August columns (blank for now)
+                f"Activity- Target to be complete by August {datetime.now().year}": "",
+                f"% work done against Target- August Status": "",
+                "Weightage_August": "",
+                "Weighted Work done against Target_August": "",
+                "Progress-August": "",
+                # Move Responsible Person and Delay Reasons to the end
+                "Responsible Person": "",  # Keep empty as requested
+                "Delay Reasons": ""        # Keep empty as requested
+            }
             
             results.append(row_data)
         
         if not results:
-            logger.error("No results generated!")
+            logger.error("No data found to generate report!")
             return
         
-        # Create Excel output
+        # ============= GENERATE EXCEL REPORT =============
         df = pd.DataFrame(results)
+        filename = f"Eden_Progress_Against_Milestones ({datetime.now():%Y-%m-%d}).xlsx"
         
-        # Column ordering
-        column_order = ["Tower"]
-        for month in MONTHS:
-            column_order.extend([f"Target {month}", f"Activity {month}"])
-        for month in MONTHS:
-            column_order.append(f"% Work Done against Target-Till {month}")
-        column_order.append(f"Delay Reasons {CURRENT_TRACKER_MONTH}")
-        
-        existing_columns = [col for col in column_order if col in df.columns]
-        df = df[existing_columns]
-        
-        filename = f"Eden_KRA_Milestone_Report_Improved ({datetime.now():%Y-%m-%d}).xlsx"
-        
-        # Create Excel file with formatting
+        # Create formatted Excel file
         wb = Workbook()
         ws = wb.active
-        ws.title = "Eden KRA Milestone Progress"
+        ws.title = "Eden- Progress Against Milestones"
         
-        # Add title and date
-        current_date = datetime.now().strftime("%d-%m-%Y")
-        ws.append(["Eden KRA Milestone Progress (Improved)"])
-        ws.append([f"Report Generated on: {current_date}"])
-        ws.append([])
+        # Add title row
+        ws.append(["Eden- Progress Against Milestones"])
+        
+        # Add report generation date below the heading
+        ws.append([f"Report Generated on: {datetime.now().strftime('%B %d, %Y')}"])
+        ws.append([])  # Empty row for spacing
         
         # Add data
         for r in dataframe_to_rows(df, index=False, header=True):
             ws.append(r)
         
-        # Format worksheet
-        header_font = Font(bold=True, size=11, color="000000")
+        # ============= FORMAT EXCEL =============
+        header_font = Font(bold=True, size=10, color="000000")
         title_font = Font(bold=True, size=14, color="000000")
-        date_font = Font(bold=False, size=10, color="666666")
-        data_font = Font(size=10)
+        date_font = Font(size=10, color="666666")
+        data_font = Font(size=9)
         center_align = Alignment(horizontal="center", vertical="center", wrap_text=True)
         left_align = Alignment(horizontal="left", vertical="center", wrap_text=True)
         border = Border(
             left=Side(style='thin'), right=Side(style='thin'),
             top=Side(style='thin'), bottom=Side(style='thin')
         )
-        header_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        header_fill = PatternFill(start_color="D9E2F3", end_color="D9E2F3", fill_type="solid")
         
-        # Format title
+        # Format title row (row 1)
         ws.merge_cells(f'A1:{get_column_letter(len(df.columns))}1')
         ws['A1'].font = title_font
         ws['A1'].alignment = center_align
         
-        # Format date
+        # Format date row (row 2)
         ws.merge_cells(f'A2:{get_column_letter(len(df.columns))}2')
         ws['A2'].font = date_font
         ws['A2'].alignment = center_align
         
-        # Format headers
+        # Format headers (row 4)
         for cell in ws[4]:
             cell.font = header_font
             cell.alignment = center_align
             cell.border = border
             cell.fill = header_fill
         
-        # Format data
+        # Format data rows
         for row_idx, row in enumerate(ws.iter_rows(min_row=5, max_row=ws.max_row), 5):
             for col_idx, cell in enumerate(row, 1):
                 cell.border = border
                 cell.font = data_font
-                cell.alignment = left_align if col_idx <= 7 else center_align
+                
+                # Alignment based on column type
+                # Updated column indices since Responsible Person and Delay Reasons moved to the end
+                if col_idx in [1, 2, 6, 7, 12, 13, 18, 19, 20]:  # Text columns (Milestone, Activity columns, Progress columns, Responsible Person, Delay Reasons)
+                    cell.alignment = left_align
+                else:  # Percentage, Weightage columns
+                    cell.alignment = center_align
         
-        # Set column widths
-        widths = {'A': 15, 'B': 20, 'C': 18, 'D': 20, 'E': 18, 'F': 20, 'G': 18, 'H': 16, 'I': 16, 'J': 16, 'K': 20}
-        for col_letter, width in widths.items():
-            if ord(col_letter) - 64 <= len(df.columns):
-                ws.column_dimensions[col_letter].width = width
+        # Dynamic column widths based on content
+        for col_idx in range(1, len(df.columns) + 1):
+            col_letter = get_column_letter(col_idx)
+            
+            # Calculate optimal width based on column content
+            max_length = 0
+            for row in ws.iter_rows(min_row=4, max_row=ws.max_row, min_col=col_idx, max_col=col_idx):
+                for cell in row:
+                    if cell.value:
+                        max_length = max(max_length, len(str(cell.value)))
+            
+            # Set minimum and maximum width constraints
+            calculated_width = min(max(max_length + 2, 10), 30)
+            ws.column_dimensions[col_letter].width = calculated_width
         
         # Set row heights
-        ws.row_dimensions[1].height = 30
-        ws.row_dimensions[2].height = 20
-        ws.row_dimensions[4].height = 30
+        ws.row_dimensions[1].height = 25  # Title row
+        ws.row_dimensions[2].height = 20  # Date row
+        ws.row_dimensions[4].height = 40  # Header row
         
-        # Save
+        # Set data row heights to accommodate wrapped text
+        for row_idx in range(5, ws.max_row + 1):
+            ws.row_dimensions[row_idx].height = 35
+        
+        # Save the file
         wb.save(filename)
-        logger.info(f"Report saved: {filename}")
+        logger.info(f"Successfully saved Eden Progress Against Milestones report to {filename}")
         
-        # Summary
-        logger.info("\nFinal Results Summary:")
-        logger.info("="*50)
+        # Log summary
+        logger.info("Report Summary:")
+        logger.info(f"  Current Month: {current_month}")
+        logger.info(f"  Available Months: {list(month_columns.keys())}")
+        logger.info(f"  Processed Towers: {len(valid_towers)}")
+        
         for result in results:
-            tower_name = result['Tower']
-            pct = result.get(f'% Work Done against Target-Till {CURRENT_TRACKER_MONTH}', '0%')
-            target = result.get(f'Target {CURRENT_TRACKER_MONTH}', '')
-            activity = result.get(f'Activity {CURRENT_TRACKER_MONTH}', '')
-            # Find the original tower key for hardcoded check
-            original_tower = None
-            for tower in towers:
-                if get_display_tower_name(tower) == tower_name:
-                    original_tower = tower
-                    break
-            hardcoded_note = " (HARDCODED)" if original_tower and original_tower in HARDCODED_PERCENTAGES else ""
-            logger.info(f"{tower_name}: {pct}{hardcoded_note}")
-            logger.info(f"  Target: {target}")
-            logger.info(f"  Activity: {activity}")
-            logger.info("")
+            milestone = result['Milestone']
+            progress_key = f'% work done against Target- {current_month} Status'
+            weighted_key = 'Weighted Work done against Target'
+            progress = result[progress_key]
+            weighted = result[weighted_key]
+            logger.info(f"  {milestone}: Progress: {progress}, Weighted: {weighted}")
             
     except Exception as e:
-        logger.error(f"Error: {str(e)}", exc_info=True)
+        logger.error(f"Error generating report: {str(e)}", exc_info=True)
         raise
 
 if __name__ == "__main__":

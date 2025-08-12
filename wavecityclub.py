@@ -20,6 +20,10 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
 logger = logging.getLogger(__name__)
 
+# Configuration for current reporting month
+CURRENT_REPORTING_MONTH = "June"  # Change this to "July" or "August" as needed
+CURRENT_YEAR = "2025"
+
 # Validate required environment variables
 required = {
     'COS_API_KEY': os.getenv('COS_API_KEY'),
@@ -183,13 +187,9 @@ def get_wcc_targets_from_kra(cos):
             }
             
             # Debug logging
-            logger.info(f"Row {row_num}: Block='{block_name}', June='{june_activity}'")
+            logger.info(f"Row {row_num}: Block='{block_name}', June='{june_activity}', July='{july_activity}', August='{august_activity}'")
     
     logger.info(f"Extracted targets for {len(targets)} blocks from KRA")
-    logger.info("=== All extracted targets ===")
-    for block, activities in targets.items():
-        logger.info(f"Block: '{block}' -> June: '{activities['June']}'")
-    
     return targets
 
 def find_activity_progress_in_sheet(sheet, target_activity, sheet_name, block_name=None):
@@ -201,7 +201,7 @@ def find_activity_progress_in_sheet(sheet, target_activity, sheet_name, block_na
     logger.info(f"=== DEBUG: Looking for activity '{target_activity}' in sheet '{sheet_name}' for block '{block_name}' ===")
     
     # Check if there's no target activity - return 100% in these cases
-    if not target_activity or target_activity.strip() == '' or target_activity.lower() in ['no target', 'no target for june', '-']:
+    if not target_activity or target_activity.strip() == '' or target_activity.lower() in ['no target', 'no target for june', 'no target for july', 'no target for august', '-']:
         logger.info(f"No specific target activity found for {block_name}, returning 100% completion")
         return 100.0
     
@@ -248,13 +248,9 @@ def find_activity_progress_in_sheet(sheet, target_activity, sheet_name, block_na
         
         logger.warning(f"NO MATCH found for {block_name} target: '{target_activity}' in enhanced search")
         
-        # Additional debugging - show character codes
-        logger.warning(f"Target activity character codes: {[ord(c) for c in target_activity]}")
-        
         return 0.0
     
     # Original logic for other blocks
-    # First, let's see what's actually in column G
     logger.info(f"=== Scanning column G in sheet '{sheet_name}' ===")
     activities_found = []
     max_rows_to_check = min(sheet.max_row, 20)  # Check first 20 rows for debugging
@@ -286,23 +282,19 @@ def find_activity_progress_in_sheet(sheet, target_activity, sheet_name, block_na
             logger.debug(f"Error checking row {row_num}: {e}")
             continue
     
-    # Log all activities found for debugging
-    logger.info(f"=== All activities found in column G ===")
-    for activity in activities_found[:10]:  # Show first 10
-        logger.info(activity)
-    
     logger.warning(f"NO EXACT MATCH found for target: '{target_activity}'")
-    logger.warning(f"Target length: {len(target_activity)}, Target repr: {repr(target_activity)}")
     return 0.0
 
-def get_wcc_progress_from_tracker(cos, targets, tracker_key):
-    """Extract progress data from tracker file and match with targets - Display June data only"""
+def get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key):
+    """Extract progress data from tracker file - Only June data populated, July and August columns blank"""
     raw = download_file_bytes(cos, tracker_key)
     wb = load_workbook(filename=BytesIO(raw), data_only=True)
     logger.info(f"Available tracker sheets: {wb.sheetnames}")
     
     progress_data = []
     milestone_counter = 1
+    total_blocks = len(targets)
+    site_weighted = round(100 / total_blocks, 2) if total_blocks > 0 else 0
     
     for block_name, month_activities in targets.items():
         logger.info(f"Processing block: {block_name}")
@@ -310,165 +302,222 @@ def get_wcc_progress_from_tracker(cos, targets, tracker_key):
         # Get the corresponding tracker sheet name
         sheet_name = BLOCK_MAPPING.get(block_name)
         
+        # Initialize progress - only calculate June, July and August will be blank
+        june_progress = 0.0
+        
         if not sheet_name:
             logger.warning(f"No sheet mapping found for block: {block_name}")
-            june_progress = 0.0
         elif sheet_name not in wb.sheetnames:
             logger.warning(f"Sheet '{sheet_name}' not found in tracker workbook")
-            june_progress = 0.0
         else:
-            # Get the sheet and find progress for June activity
+            # Get the sheet and find progress only for June
             sheet = wb[sheet_name]
             june_activity = month_activities.get('June', '')
-            # Pass block_name to the function to handle special cases
             june_progress = find_activity_progress_in_sheet(sheet, june_activity, sheet_name, block_name)
         
-        # Create row data - Keep all columns but only populate June data
+        # Calculate weighted progress for June only (July and August will be blank)
+        june_weighted = round((site_weighted * june_progress) / 100, 3)
+        
+        # Determine achieved status for June only
+        june_achieved = month_activities.get('June', '') if june_progress == 100 else ('No progress' if june_progress == 0 else f'{june_progress:.0f}% completed')
+        
+        # Handle "No target" cases for June
+        if not month_activities.get('June', '').strip():
+            june_achieved = 'No target for June'
+        
+        # Create row data in the consolidated format - July and August columns left blank
         row_data = {
             'Milestone': f"Milestone-{milestone_counter:02d}",
-            'Block': block_name,
-            'Activity June': month_activities.get('June', ''),
-            'Activity July': month_activities.get('July', ''),
-            'Activity August': month_activities.get('August', ''),
-            '% Work Done against Target-Till June': f"{june_progress:.1f}%" if june_progress > 0 else "0.0%",
-            '% Work Done against Target-Till July': "",  # Keep blank
-            '% Work Done against Target-Till August': "",  # Keep blank
-            'Delay Reasons June': "",
-            'Delay Reasons July': "",
-            'Delay Reasons August': ""
+            'Activity': block_name,
+            'Target to be complete by August-2025': month_activities.get('August', ''),
+            'Target - June-2025': month_activities.get('June', ''),
+            '% work done- June Status': f"{june_progress:.0f}%",
+            'Site Weighted (June)': site_weighted,
+            'Weighted progress against target (June)': june_weighted,  # Keep as number for sum calculation
+            'Achieved- June 2025': june_achieved,
+            'Target - July-2025': '',  # Left blank
+            '% work done- July Status': '',  # Left blank
+            'Site Weighted (July)': '',  # Left blank
+            'Weighted progress against target (July)': '',  # Left blank
+            'Achieved- July 2025': '',  # Left blank
+            'Target - August-2025': '',  # Left blank - removed .1
+            '% work done- August Status': '',  # Left blank
+            'Site Weighted (August)': '',  # Left blank
+            'Weighted progress against target (August)': '',  # Left blank
+            'Achieved- August 2025': '',  # Left blank
+            'Responsible Person': '',
+            'Delay Reasons': ''
         }
         
         progress_data.append(row_data)
         milestone_counter += 1
-        logger.info(f"Block {block_name} -> June Progress: {june_progress:.1f}%")
+        logger.info(f"Block {block_name} -> June: {june_progress:.1f}% (July and August columns left blank)")
     
-    # Create DataFrame with all columns (same format) - now includes Block column
+    # Create DataFrame with consolidated column structure
     columns = [
         'Milestone',
-        'Block',
-        'Activity June', 'Activity July', 'Activity August',
-        '% Work Done against Target-Till June',
-        '% Work Done against Target-Till July', 
-        '% Work Done against Target-Till August',
-        'Delay Reasons June', 'Delay Reasons July', 'Delay Reasons August'
+        'Activity', 
+        'Target to be complete by August-2025',
+        'Target - June-2025',
+        '% work done- June Status',
+        'Site Weighted (June)',
+        'Weighted progress against target (June)',
+        'Achieved- June 2025',
+        'Target - July-2025',
+        '% work done- July Status',
+        'Site Weighted (July)',
+        'Weighted progress against target (July)',
+        'Achieved- July 2025',
+        'Target - August-2025',
+        '% work done- August Status',
+        'Site Weighted (August)',
+        'Weighted progress against target (August)',
+        'Achieved- August 2025',
+        'Responsible Person',
+        'Delay Reasons'
     ]
     
     df = pd.DataFrame(progress_data, columns=columns)
-    logger.info(f"Created DataFrame with {len(df)} rows - June data populated, other months blank")
+    logger.info(f"Created consolidated DataFrame with {len(df)} rows for June only")
     return df
 
 # -----------------------------------------------------------------------------
 # EXCEL REPORT GENERATION
 # -----------------------------------------------------------------------------
 
-def write_wcc_excel_report(df, filename):
-    """Generate formatted Excel report"""
+def write_wcc_excel_report_consolidated(df, filename):
+    """Generate formatted Excel report with consolidated format for all months"""
     wb = Workbook()
     ws = wb.active
-    ws.title = 'Wave City Club Progress'
+    ws.title = 'Wave City Club- Progress Against Milestones'
     
-    # Add title and date at the top
+    # Add main title
+    ws.append(["Wave City Club- Progress Against Milestones"])
+    ws.merge_cells('A1:T1')
+    
+    # Add date row
     current_date = datetime.now().strftime("%d-%m-%Y")
-    ws.append(["Wave City Club Structure Work Progress"])
     ws.append([f"Report Generated on: {current_date}"])
-    ws.append([])  # Empty row for spacing
+    ws.merge_cells('A2:T2')
     
-    # Define styles
-    yellow = PatternFill(start_color='FFFF00', end_color='FFFF00', fill_type='solid')
-    grey   = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
-    bold   = Font(bold=True)
-    norm   = Font(bold=False)
-    title_font = Font(bold=True, size=14)
-    date_font = Font(bold=False, size=10, color="666666")
-    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
-    left   = Alignment(horizontal='left', vertical='center', wrap_text=True)
-    thin   = Side(style='thin', color='000000')
-    border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    # Add empty row
+    ws.append([])
     
-    # Style title row
-    ws.merge_cells(f'A1:{get_column_letter(len(df.columns))}1')
-    ws['A1'].font = title_font
-    ws['A1'].alignment = center
-    ws['A1'].fill = grey
-    
-    # Style date row
-    ws.merge_cells(f'A2:{get_column_letter(len(df.columns))}2')
-    ws['A2'].font = date_font
-    ws['A2'].alignment = center
-
-    # Add section title
-    ws.append(["Wave City Club Structure Work Progress Against Milestones"])
-    title_row = ws.max_row
-    ws.merge_cells(start_row=title_row, start_column=1, end_row=title_row, end_column=len(df.columns))
-    
-    for cell in ws[title_row]:
-        cell.fill = grey
-        cell.font = bold
-        cell.alignment = center
-        cell.border = border
-    
-    # Add DataFrame data
+    # Add DataFrame data with percentage formatting for weighted progress
     for row in dataframe_to_rows(df, index=False, header=True):
+        # Format the weighted progress column (column 7) to add % symbol
+        if len(row) >= 7 and isinstance(row[6], (int, float)) and row[6] != '':
+            row[6] = f"{row[6]:.3f}%"
         ws.append(row)
     
-    # Style header row
-    header_row = title_row + 1
+    # Add Sum row - Only June has sum, July and August are blank
+    june_sum = df['Weighted progress against target (June)'].sum()
+    
+    sum_row = ['', '', '', '', '', 'Sum', f'{june_sum:.3f}%', '', '', '', '', '', '', '', '', '', '', '', '', '']
+    ws.append(sum_row)
+    
+    # Define styles
+    title_font = Font(bold=True, size=12)
+    header_font = Font(bold=True, size=8)
+    normal_font = Font(bold=False, size=8)
+    date_font = Font(bold=False, size=10, color="666666")
+    center = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    left = Alignment(horizontal='left', vertical='center', wrap_text=True)
+    thin = Side(style='thin', color='000000')
+    border = Border(top=thin, bottom=thin, left=thin, right=thin)
+    light_grey_fill = PatternFill(start_color='D3D3D3', end_color='D3D3D3', fill_type='solid')
+    light_blue_fill = PatternFill(start_color='ADD8E6', end_color='ADD8E6', fill_type='solid')
+    
+    # Style title (light grey background)
+    ws['A1'].font = title_font
+    ws['A1'].alignment = center
+    ws['A1'].fill = light_grey_fill
+    
+    # Style date row
+    ws['A2'].font = date_font
+    ws['A2'].alignment = center
+    
+    # Style header row (row 4) with light grey background
+    header_row = 4
     for cell in ws[header_row]:
-        cell.font = bold
+        cell.font = header_font
         cell.alignment = center
         cell.border = border
+        cell.fill = light_grey_fill
     
     # Style data rows
-    body_start = header_row + 1
-    body_end = ws.max_row
+    data_start = 5
+    data_end = ws.max_row - 1  # Exclude sum row for now
     
-    for r in range(body_start, body_end + 1):
-        for cell in ws[r]:
-            cell.font = norm
-            # Left align text columns, center align percentage columns
-            if cell.column in [1, 2, 3, 4, 5, 9, 10, 11]:  # Milestone, Block, and activity columns, delay reason columns
-                cell.alignment = left
-            else:  # Percentage columns
-                cell.alignment = center
+    for row_num in range(data_start, data_end + 1):
+        for col_num in range(1, 21):  # Columns A to T
+            cell = ws.cell(row=row_num, column=col_num)
+            cell.font = normal_font
             cell.border = border
+            
+            # Alignment based on column type
+            if col_num in [1, 2, 3, 4, 8, 9, 13, 14, 18, 19, 20]:  # Text columns
+                cell.alignment = left
+            else:  # Numeric columns
+                cell.alignment = center
     
-    # Adjust column widths - Updated for Block column
+    # Style sum row with light blue background
+    sum_row_num = ws.max_row
+    for col_num in range(1, 21):  # Columns A to T
+        cell = ws.cell(row=sum_row_num, column=col_num)
+        cell.font = header_font
+        cell.border = border
+        cell.fill = light_blue_fill
+        cell.alignment = center
+    
+    # Adjust column widths for consolidated format
     column_widths = {
-        1: 15,  # Milestone
-        2: 35,  # Block (wider for long block names)
-        3: 25,  # Activity June
-        4: 25,  # Activity July
-        5: 25,  # Activity August
-        6: 22,  # % Work Done June
-        7: 22,  # % Work Done July
-        8: 22,  # % Work Done August
-        9: 20,  # Delay Reasons June
-        10: 20, # Delay Reasons July
-        11: 20  # Delay Reasons August
+        1: 8,   # Milestone
+        2: 12,  # Activity
+        3: 12,  # Target August
+        4: 12,  # Target June
+        5: 8,   # % work done June
+        6: 6,   # Site Weighted
+        7: 8,   # Weighted progress June
+        8: 12,  # Achieved June
+        9: 12,  # Target July
+        10: 8,  # % work done July
+        11: 6,  # Site Weighted July
+        12: 8,  # Weighted progress July
+        13: 12, # Achieved July
+        14: 12, # Target August
+        15: 8,  # % work done August
+        16: 6,  # Site Weighted August
+        17: 8,  # Weighted progress August
+        18: 12, # Achieved August
+        19: 12, # Responsible Person
+        20: 10  # Delay Reasons
     }
     
     for col_num, width in column_widths.items():
         ws.column_dimensions[get_column_letter(col_num)].width = width
     
     # Set row heights
-    for i in range(1, ws.max_row + 1):
-        ws.row_dimensions[i].height = 22
+    ws.row_dimensions[1].height = 25  # Title row
+    ws.row_dimensions[2].height = 20  # Date row
+    for i in range(4, ws.max_row + 1):
+        ws.row_dimensions[i].height = 25
     
     wb.save(filename)
-    logger.info(f'Report saved to {filename}')
+    logger.info(f'Consolidated report saved to {filename}')
 
 # -----------------------------------------------------------------------------
 # MAIN FUNCTION
 # -----------------------------------------------------------------------------
 
 def main():
-    """Main execution function"""
+    """Main execution function for consolidated report"""
     try:
         # Initialize COS client
         cos = init_cos()
         
         # Get targets from KRA file
-        logger.info("Fetching Wave City Club targets from KRA file...")
+        logger.info("Fetching Wave City Club targets from KRA file for consolidated reporting...")
         targets = get_wcc_targets_from_kra(cos)
         
         # Determine tracker file to use
@@ -480,16 +529,17 @@ def main():
         except Exception:
             tracker_key = find_latest_wcc_tracker_key(cos)
         
-        # Extract progress data
-        logger.info("Extracting progress data from tracker...")
-        df = get_wcc_progress_from_tracker(cos, targets, tracker_key)
+        # Extract progress data for all months
+        logger.info("Extracting progress data from tracker for June only (July/August blank)...")
+        df = get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key)
         
-        # Generate report
-        filename = f"Wave_City_Club_Milestone_Report_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
-        logger.info(f"Generating Excel report with June data (other months blank)")
-        write_wcc_excel_report(df, filename)
+        # Generate consolidated report
+        current_date_for_filename = datetime.now().strftime('%d-%m-%Y')
+        filename = f"Wave_City_Club Milestone Report ({current_date_for_filename}).xlsx"
+        logger.info("Generating consolidated Excel report")
+        write_wcc_excel_report_consolidated(df, filename)
         
-        logger.info("Report generation completed successfully! June data populated, July/August blank.")
+        logger.info("Consolidated report generation completed successfully!")
         
     except Exception as e:
         logger.error(f"Error in main execution: {e}")

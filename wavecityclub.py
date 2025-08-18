@@ -325,56 +325,56 @@ def get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key):
         if not month_activities.get('June', '').strip():
             june_achieved = 'No target for June'
         
-        # Create row data in the consolidated format - July and August columns left blank
+        # Create row data in the new consolidated format
         row_data = {
             'Milestone': f"Milestone-{milestone_counter:02d}",
-            'Activity': block_name,
+            'Block': block_name,  # Changed from 'Activity' to 'Block'
             'Target to be complete by August-2025': month_activities.get('August', ''),
             'Target - June-2025': month_activities.get('June', ''),
             '% work done- June Status': f"{june_progress:.0f}%",
-            'Site Weighted (June)': site_weighted,
-            'Weighted progress against target (June)': june_weighted,  # Keep as number for sum calculation
             'Achieved- June 2025': june_achieved,
+            'Responsible Person- June': '',  # June specific
+            'Delay Reasons- June': '',  # June specific
             'Target - July-2025': '',  # Left blank
             '% work done- July Status': '',  # Left blank
-            'Site Weighted (July)': '',  # Left blank
-            'Weighted progress against target (July)': '',  # Left blank
             'Achieved- July 2025': '',  # Left blank
-            'Target - August-2025': '',  # Left blank - removed .1
+            'Responsible Person- July': '',  # July specific
+            'Delay Reasons- July': '',  # July specific
+            'Target - August-2025': '',  # Left blank
             '% work done- August Status': '',  # Left blank
-            'Site Weighted (August)': '',  # Left blank
-            'Weighted progress against target (August)': '',  # Left blank
             'Achieved- August 2025': '',  # Left blank
-            'Responsible Person': '',
-            'Delay Reasons': ''
+            'Responsible Person- August': '',  # August specific
+            'Delay Reasons- August': '',  # August specific
+            'Site Weighted': site_weighted,  # Single column, not repeated
+            'Weighted progress against target': june_weighted,  # Single column, not repeated
         }
         
         progress_data.append(row_data)
         milestone_counter += 1
         logger.info(f"Block {block_name} -> June: {june_progress:.1f}% (July and August columns left blank)")
     
-    # Create DataFrame with consolidated column structure
+    # Create DataFrame with new consolidated column structure
     columns = [
         'Milestone',
-        'Activity', 
+        'Block',  # Changed from 'Activity'
         'Target to be complete by August-2025',
         'Target - June-2025',
         '% work done- June Status',
-        'Site Weighted (June)',
-        'Weighted progress against target (June)',
         'Achieved- June 2025',
+        'Responsible Person- June',
+        'Delay Reasons- June',
         'Target - July-2025',
         '% work done- July Status',
-        'Site Weighted (July)',
-        'Weighted progress against target (July)',
         'Achieved- July 2025',
+        'Responsible Person- July',
+        'Delay Reasons- July',
         'Target - August-2025',
         '% work done- August Status',
-        'Site Weighted (August)',
-        'Weighted progress against target (August)',
         'Achieved- August 2025',
-        'Responsible Person',
-        'Delay Reasons'
+        'Responsible Person- August',
+        'Delay Reasons- August',
+        'Site Weighted',  # Single column
+        'Weighted progress against target'  # Single column
     ]
     
     df = pd.DataFrame(progress_data, columns=columns)
@@ -405,15 +405,18 @@ def write_wcc_excel_report_consolidated(df, filename):
     
     # Add DataFrame data with percentage formatting for weighted progress
     for row in dataframe_to_rows(df, index=False, header=True):
-        # Format the weighted progress column (column 7) to add % symbol
-        if len(row) >= 7 and isinstance(row[6], (int, float)) and row[6] != '':
-            row[6] = f"{row[6]:.3f}%"
+        # Format the weighted progress column (last column) to add % symbol
+        if len(row) >= 20 and isinstance(row[19], (int, float)) and row[19] != '':
+            row[19] = f"{row[19]:.3f}%"
         ws.append(row)
     
-    # Add Sum row - Only June has sum, July and August are blank
-    june_sum = df['Weighted progress against target (June)'].sum()
+    # Add Sum row - Only for the weighted progress column
+    weighted_sum = df['Weighted progress against target'].sum()
     
-    sum_row = ['', '', '', '', '', 'Sum', f'{june_sum:.3f}%', '', '', '', '', '', '', '', '', '', '', '', '', '']
+    # Create sum row with blanks for all columns except the weighted progress column
+    sum_row = [''] * 20
+    sum_row[18] = 'Sum'  # Site Weighted column
+    sum_row[19] = f'{weighted_sum:.3f}%'  # Weighted progress column
     ws.append(sum_row)
     
     # Define styles
@@ -456,7 +459,7 @@ def write_wcc_excel_report_consolidated(df, filename):
             cell.border = border
             
             # Alignment based on column type
-            if col_num in [1, 2, 3, 4, 8, 9, 13, 14, 18, 19, 20]:  # Text columns
+            if col_num in [1, 2, 3, 4, 6, 7, 8, 9, 11, 12, 13, 14, 16, 17, 18]:  # Text columns
                 cell.alignment = left
             else:  # Numeric columns
                 cell.alignment = center
@@ -470,28 +473,28 @@ def write_wcc_excel_report_consolidated(df, filename):
         cell.fill = light_blue_fill
         cell.alignment = center
     
-    # Adjust column widths for consolidated format
+    # Adjust column widths for new consolidated format
     column_widths = {
         1: 8,   # Milestone
-        2: 12,  # Activity
+        2: 12,  # Block (changed from Activity)
         3: 12,  # Target August
         4: 12,  # Target June
         5: 8,   # % work done June
-        6: 6,   # Site Weighted
-        7: 8,   # Weighted progress June
-        8: 12,  # Achieved June
+        6: 12,  # Achieved June
+        7: 12,  # Responsible Person June
+        8: 10,  # Delay Reasons June
         9: 12,  # Target July
         10: 8,  # % work done July
-        11: 6,  # Site Weighted July
-        12: 8,  # Weighted progress July
-        13: 12, # Achieved July
+        11: 12, # Achieved July
+        12: 12, # Responsible Person July
+        13: 10, # Delay Reasons July
         14: 12, # Target August
         15: 8,  # % work done August
-        16: 6,  # Site Weighted August
-        17: 8,  # Weighted progress August
-        18: 12, # Achieved August
-        19: 12, # Responsible Person
-        20: 10  # Delay Reasons
+        16: 12, # Achieved August
+        17: 12, # Responsible Person August
+        18: 10, # Delay Reasons August
+        19: 6,  # Site Weighted (single column)
+        20: 8   # Weighted progress (single column)
     }
     
     for col_num, width in column_widths.items():

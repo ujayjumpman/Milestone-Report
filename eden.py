@@ -84,6 +84,12 @@ def discover_months_and_columns(kra_ws):
                     if full_month.capitalize() in months_found:
                         break
     
+    # Only add August if it's not found (don't override existing detections)
+    if 'August' not in months_found:
+        logger.info("August not found automatically, manually setting August to column 4 (D)")
+        months_found['August'] = 4
+        
+    logger.info(f"Final month columns mapping: {months_found}")
     return months_found
 
 def discover_current_month(tracker_filename):
@@ -231,6 +237,27 @@ def find_correct_percentage_column(tracker_ws, row, task_name):
     
     return None, None
 
+def find_responsible_person_and_delay(tracker_ws, row, task_name):
+    """Find responsible person and delay reasons for a specific task"""
+    responsible_person = ""
+    delay_reason = ""
+    
+    try:
+        # Get responsible person from column F (RESPONSIBLE_COL)
+        resp_val = tracker_ws.cell(row=row, column=RESPONSIBLE_COL).value
+        if resp_val:
+            responsible_person = str(resp_val).strip()
+        
+        # Get delay reason from column H (DELAY_COL)
+        delay_val = tracker_ws.cell(row=row, column=DELAY_COL).value
+        if delay_val:
+            delay_reason = str(delay_val).strip()
+            
+    except Exception as e:
+        logger.warning(f"Error getting responsible person/delay for '{task_name}': {e}")
+    
+    return responsible_person, delay_reason
+
 def validate_expected_percentages(tower, extracted_pct):
     """Validate extracted percentages against expected values for debugging"""
     expected_values = {
@@ -268,7 +295,7 @@ def alternative_percentage_search(tracker_ws, child_name, tower):
     # For NTA searches, we should NOT use alternative search as it bypasses basement filtering
     if is_nta_search:
         logger.info(f"Skipping alternative search for NTA area '{tower}' to maintain basement-level filtering")
-        return 0.0
+        return 0.0, "", ""
     
     # Simple row-by-row search for the activity (non-NTA only)
     for row in range(2, max_row + 1):
@@ -283,6 +310,8 @@ def alternative_percentage_search(tracker_ws, child_name, tower):
                 
                 # Find correct percentage column
                 correct_col, pct_val = find_correct_percentage_column(tracker_ws, row, task_val)
+                responsible_person, delay_reason = find_responsible_person_and_delay(tracker_ws, row, task_val)
+                
                 if pct_val is not None:
                     try:
                         if isinstance(pct_val, (int, float)):
@@ -302,12 +331,12 @@ def alternative_percentage_search(tracker_ws, child_name, tower):
                                 result = 0.0
                         
                         logger.info(f"Alternative search extracted: {pct_val} -> {result}%")
-                        return result
+                        return result, responsible_person, delay_reason
                     except Exception as e:
                         logger.warning(f"Error in alternative parsing: {e}")
     
     logger.warning(f"Alternative search found no matches for '{child_name}'")
-    return 0.0
+    return 0.0, "", ""
 
 def calculate_dynamic_weightage(tower, kra_ws, month_columns):
     """Dynamically calculate weightage based on activity complexity or data in sheets"""
@@ -646,12 +675,12 @@ def find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name,
     
     if not parent_names:
         logger.warning(f"No valid parent names provided for child: {child_name}")
-        return 0.0
+        return 0.0, "", ""
     
     child_name_clean = str(child_name).strip().lower() if child_name else ""
     if not child_name_clean:
         logger.warning("Child name is empty or None")
-        return 0.0
+        return 0.0, "", ""
     
     logger.info(f"=== HIERARCHY SEARCH for '{child_name}' ===")
     logger.info(f"Looking for parents: {parent_names}")
@@ -745,7 +774,7 @@ def find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name,
     
     if not matching_parent_sections:
         logger.warning(f"❌ No valid parent sections found for: {parent_names}")
-        return 0.0
+        return 0.0, "", ""
     
     # STEP 2: Search for the exact child activity in matching sections
     for section_start, section_end in matching_parent_sections:
@@ -759,6 +788,7 @@ def find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name,
             # Get percentage from the found row
             task_name = tracker_ws.cell(row=found_row, column=TASK_NAME_COL).value
             correct_col, pct_val = find_correct_percentage_column(tracker_ws, found_row, task_name)
+            responsible_person, delay_reason = find_responsible_person_and_delay(tracker_ws, found_row, task_name)
             
             logger.info(f"✅ FOUND exact match at row {found_row}: '{task_name}' = {pct_val} (column {correct_col})")
             
@@ -772,17 +802,17 @@ def find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name,
                     # For NTA searches, return the FIRST valid match from the correct section
                     if is_nta_search and required_basement_type:
                         logger.info(f"✅ NTA-{nta_number} final result from row {found_row}: {result}%")
-                        return result
+                        return result, responsible_person, delay_reason
                     
                     # For non-NTA, return the first match found
-                    return result
+                    return result, responsible_person, delay_reason
                     
                 except Exception as e:
                     logger.warning(f"❌ Error parsing percentage '{pct_val}': {e}")
                     continue
     
     logger.warning(f"❌ Child activity '{child_name}' not found in any matching parent section")
-    return 0.0
+    return 0.0, "", ""
 
 def find_next_bold_parent(tracker_ws, start_row, max_row):
     """Find the next bold parent to determine section boundary - IMPROVED"""
@@ -823,7 +853,7 @@ def calculate_percentage_for_current_month(tower, month, month_col, kra_ws, trac
     
     if not parent_names or not child_name:
         logger.warning(f"Missing parent activities or child activity for {tower} in {month}")
-        return 0.0
+        return 0.0, "", ""
     
     logger.info(f"\n=== PROCESSING {tower} ({month}) ===")
     logger.info(f"Parent activities: {parent_names}")
@@ -833,7 +863,7 @@ def calculate_percentage_for_current_month(tower, month, month_col, kra_ws, trac
     tracker_sheetname = sheet_mapping.get(tower)
     if not tracker_sheetname or tracker_sheetname not in tracker_wb.sheetnames:
         logger.warning(f"Sheet for '{tower}' not found in tracker")
-        return 0.0
+        return 0.0, "", ""
     
     tracker_ws = tracker_wb[tracker_sheetname]
     logger.info(f"Using tracker sheet: {tracker_sheetname}")
@@ -842,20 +872,21 @@ def calculate_percentage_for_current_month(tower, month, month_col, kra_ws, trac
     debug_tracker_sheet_structure(tracker_ws, tower)
     
     # Find the percentage completion using hierarchy
-    pct = find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name, tower)
+    pct, responsible_person, delay_reason = find_child_activity_pct_with_hierarchy(tracker_ws, parent_names, child_name, tower)
     
     # If hierarchy method didn't work well, try alternative method
     if pct == 0.0:
         logger.info(f"Hierarchy method returned 0%, trying alternative search...")
-        pct = alternative_percentage_search(tracker_ws, child_name, tower)
+        pct, responsible_person, delay_reason = alternative_percentage_search(tracker_ws, child_name, tower)
     
     # Validate against expected values
     validate_expected_percentages(tower, pct)
     
     logger.info(f"✓ {tower} ({month}): '{child_name}' = {pct:.1f}% complete")
+    logger.info(f"✓ Responsible: {responsible_person}, Delay: {delay_reason}")
     logger.info(f"=== END {tower} ===\n")
     
-    return pct
+    return pct, responsible_person, delay_reason
 
 def format_progress_status(achieved_activities, planned_activities):
     """Format the progress status based on achieved vs planned activities"""
@@ -922,67 +953,127 @@ def main():
         for tower in valid_towers:
             logger.info(f"Processing {tower}...")
             
-            # Get June activities (all parent + child activities) - EXACT from KRA sheet
-            june_month = "June"  # Fixed to June as requested
-            if june_month not in month_columns:
-                # Try to find June in available months (case insensitive)
-                june_month = next((month for month in month_columns.keys() if 'june' in month.lower()), None)
-                if not june_month:
-                    logger.warning(f"June not found in available months: {list(month_columns.keys())}")
-                    continue
-            
-            june_month_col = month_columns[june_month]
-            
-            # Get all June activities (parent + child) with exact text
-            june_activities = get_all_activities_for_month(tower, june_month, june_month_col, kra_ws)
-            
             # Get tower name from KRA sheet instead of milestone name
             tower_name = get_tower_name_from_kra(tower, kra_ws)
-            
-            # Calculate percentage for current month
-            current_month_col = month_columns[current_month]
-            current_month_pct = calculate_percentage_for_current_month(
-                tower, current_month, current_month_col, kra_ws, tracker_wb, sheet_mapping
-            )
             
             # Get dynamic weightage
             weightage = calculate_dynamic_weightage(tower, kra_ws, month_columns)
             
-            # Calculate weighted work done
-            weighted_work_done = round((current_month_pct * weightage) / 100, 1)
-            
-            # Get achieved and planned activities
-            current_activity = get_activity_for_month(tower, current_month, current_month_col, kra_ws)
-            achieved_activity = current_activity if current_month_pct > 0 else ""
-            planned_activity = current_activity if current_month_pct == 0 else ""
-            
-            # Format progress status with separator line
-            progress_status = format_progress_status(achieved_activity, planned_activity)
-            
-            # Create row data with Responsible Person and Delay Reasons at the end
+            # Initialize the row data with basic info
             row_data = {
-                "Milestone": tower_name,
-                f"Activity- Target to be complete by June {datetime.now().year}": june_activities,
-                f"% work done against Target- {current_month} Status": f"{current_month_pct:.0f}%" if current_month_pct > 0 else "0%",
-                "Weightage": weightage,
-                "Weighted Work done against Target": f"{weighted_work_done:.1f}%",
-                f"Progress-{current_month}": progress_status,
-                # Add July columns (blank for now)
-                f"Activity- Target to be complete by July {datetime.now().year}": "",
-                f"% work done against Target- July Status": "",
-                "Weightage_July": "",
-                "Weighted Work done against Target_July": "",
-                "Progress-July": "",
-                # Add August columns (blank for now)
-                f"Activity- Target to be complete by August {datetime.now().year}": "",
-                f"% work done against Target- August Status": "",
-                "Weightage_August": "",
-                "Weighted Work done against Target_August": "",
-                "Progress-August": "",
-                # Move Responsible Person and Delay Reasons to the end
-                "Responsible Person": "",  # Keep empty as requested
-                "Delay Reasons": ""        # Keep empty as requested
+                "Tower": tower_name,
+                "Target till August": "",  # Will be filled with August targets
             }
+            
+            # Process June month (current month with actual data)
+            june_month = "June"
+            if june_month not in month_columns:
+                # Try to find June in available months (case insensitive)
+                june_month = next((m for m in month_columns.keys() if 'june' in m.lower()), None)
+                if not june_month:
+                    logger.warning(f"June not found in available months: {list(month_columns.keys())}")
+                    june_month = list(month_columns.keys())[0] if month_columns else "June"
+            
+            june_month_col = month_columns[june_month] if june_month in month_columns else None
+            
+            # Get June data (actual progress)
+            if june_month_col:
+                # Get all June activities (parent + child) with exact text
+                june_activities = get_all_activities_for_month(tower, june_month, june_month_col, kra_ws)
+                
+                # Calculate percentage for June (current month)
+                if june_month.lower() == current_month.lower():
+                    # For current month, get actual progress from tracker
+                    june_pct, responsible_person, delay_reason = calculate_percentage_for_current_month(
+                        tower, june_month, june_month_col, kra_ws, tracker_wb, sheet_mapping
+                    )
+                else:
+                    june_pct = 0.0
+                    responsible_person = ""
+                    delay_reason = ""
+                
+                # Get achieved and planned activities for June
+                june_activity = get_activity_for_month(tower, june_month, june_month_col, kra_ws)
+                achieved_activity = june_activity if june_pct > 0 else ""
+                planned_activity = june_activity if june_pct == 0 else ""
+                
+                # Format progress status for June
+                june_progress_status = format_progress_status(achieved_activity, planned_activity)
+            else:
+                june_activities = ""
+                june_pct = 0.0
+                june_progress_status = "No Progress"
+                responsible_person = ""
+                delay_reason = ""
+            
+            # Get August targets for "Target till August" column
+            august_month = "August"
+            august_targets = ""
+            
+            # Debug: Show available months
+            logger.info(f"Available months in KRA sheet: {list(month_columns.keys())}")
+            
+            # Try to find August in available months (case insensitive)
+            found_august = None
+            for month_name in month_columns.keys():
+                if 'august' in month_name.lower():
+                    found_august = month_name
+                    break
+            
+            if found_august:
+                august_month_col = month_columns[found_august]
+                logger.info(f"Found August month: '{found_august}' in column {august_month_col}")
+                
+                # Get August targets - these should be different from June
+                august_targets = get_all_activities_for_month(tower, found_august, august_month_col, kra_ws)
+                logger.info(f"August targets for {tower}: '{august_targets}'")
+                
+                # Debug: Let's also check what's in the August cells directly
+                if tower in KRA_PARENT_ROW and tower in KRA_ACTIVITY_ROW:
+                    logger.info(f"Debug - Direct August cell values for {tower}:")
+                    parent_rows = KRA_PARENT_ROW[tower]
+                    for i, parent_row in enumerate(parent_rows):
+                        cell_val = kra_ws.cell(row=parent_row, column=august_month_col).value
+                        logger.info(f"  Parent row {parent_row} (August col {august_month_col}): '{cell_val}'")
+                    
+                    child_row = KRA_ACTIVITY_ROW[tower]
+                    child_val = kra_ws.cell(row=child_row, column=august_month_col).value
+                    logger.info(f"  Child row {child_row} (August col {august_month_col}): '{child_val}'")
+            else:
+                logger.warning(f"August not found in available months: {list(month_columns.keys())}")
+                august_targets = ""
+            
+            # Set August targets in the "Target till August" column
+            row_data["Target till August"] = august_targets
+            logger.info(f"Final Target till August for {tower}: '{august_targets}'")
+            
+            # Add June data
+            row_data[f"Activity- Target to be complete by June {datetime.now().year}"] = june_activities
+            row_data[f"% work done against Target- June Status"] = f"{june_pct:.0f}%" if june_pct > 0 else "0%"
+            row_data[f"Progress-June"] = june_progress_status
+            row_data[f"Responsible Person-June"] = ""  # Leave blank as requested
+            row_data[f"Delay Reasons-June"] = ""       # Leave blank as requested
+            
+            # Add July data (all blank for now as requested)
+            row_data[f"Activity- Target to be complete by July {datetime.now().year}"] = ""
+            row_data[f"% work done against Target- July Status"] = ""
+            row_data[f"Progress-July"] = ""
+            row_data[f"Responsible Person-July"] = ""
+            row_data[f"Delay Reasons-July"] = ""
+            
+            # Add August data (all blank for now as requested)
+            row_data[f"Activity- Target to be complete by August {datetime.now().year}"] = ""
+            row_data[f"% work done against Target- August Status"] = ""
+            row_data[f"Progress-August"] = ""
+            row_data[f"Responsible Person-August"] = ""
+            row_data[f"Delay Reasons-August"] = ""
+            
+            # Calculate overall weighted work done (based on June progress)
+            weighted_work_done = round((june_pct * weightage) / 100, 1)
+            
+            # Add final columns (Weightage and Weighted Work done are now at the end)
+            row_data["Weightage"] = weightage
+            row_data["Weighted Work done against Target"] = f"{weighted_work_done:.1f}%"
             
             results.append(row_data)
         
@@ -1047,8 +1138,9 @@ def main():
                 cell.font = data_font
                 
                 # Alignment based on column type
-                # Updated column indices since Responsible Person and Delay Reasons moved to the end
-                if col_idx in [1, 2, 6, 7, 12, 13, 18, 19, 20]:  # Text columns (Milestone, Activity columns, Progress columns, Responsible Person, Delay Reasons)
+                # Text columns get left alignment, percentage and number columns get center alignment
+                if any(keyword in str(cell.column_letter) for keyword in ['A', 'B']) or \
+                   any(keyword in str(ws.cell(row=4, column=col_idx).value or '') for keyword in ['Tower', 'Target', 'Activity', 'Progress', 'Responsible', 'Delay']):
                     cell.alignment = left_align
                 else:  # Percentage, Weightage columns
                     cell.alignment = center_align
@@ -1088,12 +1180,12 @@ def main():
         logger.info(f"  Processed Towers: {len(valid_towers)}")
         
         for result in results:
-            milestone = result['Milestone']
-            progress_key = f'% work done against Target- {current_month} Status'
+            tower_name = result['Tower']
+            progress_key = f'% work done against Target- June Status'  # Changed to June since that's the only one with data
             weighted_key = 'Weighted Work done against Target'
-            progress = result[progress_key]
-            weighted = result[weighted_key]
-            logger.info(f"  {milestone}: Progress: {progress}, Weighted: {weighted}")
+            progress = result.get(progress_key, "0%")
+            weighted = result.get(weighted_key, "0.0%")
+            logger.info(f"  {tower_name}: Progress: {progress}, Weighted: {weighted}")
             
     except Exception as e:
         logger.error(f"Error generating report: {str(e)}", exc_info=True)

@@ -145,6 +145,7 @@ def setup_dynamic_months(tracker_date: datetime) -> Tuple[List[str], str, dateti
     1. If tracker is in September → include June, July, August.
     2. Otherwise → include previous, current, next months.
     """
+    global MONTHS, MONTH_YEARS, TARGET_END_MONTH, TARGET_END_YEAR, TRACKER_DATE
 
     months = [
         'January', 'February', 'March', 'April', 'May', 'June',
@@ -171,8 +172,16 @@ def setup_dynamic_months(tracker_date: datetime) -> Tuple[List[str], str, dateti
             (next_month_date.month, next_month_date.year)
         ]
 
-    # Build labeled month list
+    # Build labeled month list and set globals
     MONTHS = [f"{months[m - 1]} {y}" for m, y in MONTHS_DATA]
+    
+    # Build MONTH_YEARS mapping
+    MONTH_YEARS = {f"{months[m - 1]} {y}": y for m, y in MONTHS_DATA}
+    
+    TARGET_END_MONTH = months[MONTHS_DATA[-1][0] - 1]
+    TARGET_END_YEAR = MONTHS_DATA[-1][1]
+    TRACKER_DATE = tracker_date
+    
     TARGET_MONTH = MONTHS[-1]
 
     return MONTHS, TARGET_MONTH, tracker_date, MONTHS_DATA
@@ -434,7 +443,7 @@ def get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key):
                     )
         
         # Use the last month for weighted calculation
-        last_month = MONTHS[-1] if MONTHS else 'August'
+        last_month = MONTHS[-1] if MONTHS else ''
         main_weighted = round((site_weighted * month_progress[last_month]) / 100, 3)
         
         # Create row data with dynamic columns
@@ -693,3 +702,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+

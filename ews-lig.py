@@ -1,4 +1,3 @@
-
 import os
 import re
 import logging
@@ -125,7 +124,7 @@ def setup_dynamic_months_and_targets(tracker_date):
         MONTHS_DATA.append((month_num, year))
 
     # Month labels with year
-    MONTHS = [f"{get_month_name(m)} {y}" for m, y in MONTHS_DATA]
+    MONTHS = [f"{get_month_name(m)}" for m, y in MONTHS_DATA]
 
     # Mapping month name to number (without year)
     MONTH_TO_NUM = {get_month_name(m): m for m in range(1, 13)}
@@ -394,8 +393,6 @@ def get_unique_filename(base_name):
         counter += 1
         new_name = f"{name}({counter}){ext}"
     return new_name
-
-
 
 
 # =============== MAIN ===============

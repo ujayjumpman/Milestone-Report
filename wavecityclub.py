@@ -27,7 +27,6 @@ required = {
     'COS_SERVICE_INSTANCE_CRN': os.getenv('COS_SERVICE_INSTANCE_CRN'),
     'COS_ENDPOINT': os.getenv('COS_ENDPOINT'),
     'COS_BUCKET_NAME': os.getenv('COS_BUCKET_NAME'),
-    'KRA_FILE_PATH': os.getenv('KRA_FILE_PATH'),
 }
 missing = [k for k, v in required.items() if not v]
 if missing:
@@ -37,20 +36,20 @@ if missing:
 COS_API_KEY     = required['COS_API_KEY']
 COS_CRN         = required['COS_SERVICE_INSTANCE_CRN']
 COS_ENDPOINT    = required['COS_ENDPOINT']
-BUCKET          = required['COS_BUCKET_NAME']
-WCC_KRA_KEY     = required['KRA_FILE_PATH']
+BUCKET          = required['COS_BUCKET_NAME']  # projectreportnew - contains both KRA and trackers
 
-# Dynamic tracker path - will be set by get_latest_tracker_paths()
-WCC_TRACKER_KEY = None
+# Dynamic paths and configuration
+WCC_KRA_KEY = None  # Will be set by get_latest_kra_file()
+TRACKER_KEYS = {}  # Maps month name to tracker file key
 
-# Dynamic months and years - will be set based on tracker date
+# Dynamic months and years
 MONTHS = []
 MONTH_YEARS = {}  # Maps month name to year
 TRACKER_DATE = None
-TARGET_END_MONTH = None  # The last month in our 3-month range
+TARGET_END_MONTH = None
 TARGET_END_YEAR = None
 
-# Block mapping from KRA to tracker sheets (exact mapping as specified)
+# Block mapping from KRA to tracker sheets
 BLOCK_MAPPING = {
     'Block 1 (B1) Banquet Hall': 'B1 Banket Hall & Finedine ',
     'Fine Dine': 'B1 Banket Hall & Finedine ',
@@ -85,15 +84,20 @@ def init_cos():
     )
 
 def download_file_bytes(cos, key):
+    """Download file from bucket"""
     if not key:
         raise ValueError("File key cannot be None or empty")
     obj = cos.get_object(Bucket=BUCKET, Key=key)
     return obj['Body'].read()
 
-def list_files_in_folder(cos, folder_prefix):
+def list_files_in_folder(cos, folder_prefix=""):
     """List all files in a specific folder (prefix) in the COS bucket"""
     try:
-        response = cos.list_objects_v2(Bucket=BUCKET, Prefix=folder_prefix)
+        if folder_prefix:
+            response = cos.list_objects_v2(Bucket=BUCKET, Prefix=folder_prefix)
+        else:
+            response = cos.list_objects_v2(Bucket=BUCKET)
+        
         files = []
         if 'Contents' in response:
             for obj in response['Contents']:
@@ -101,7 +105,7 @@ def list_files_in_folder(cos, folder_prefix):
                     files.append(obj['Key'])
         return files
     except Exception as e:
-        logger.error(f"Error listing files in folder {folder_prefix}: {e}")
+        logger.error(f"Error listing files in bucket {BUCKET}, folder {folder_prefix}: {e}")
         return []
 
 def extract_date_from_filename(filename):
@@ -116,6 +120,33 @@ def extract_date_from_filename(filename):
             logger.warning(f"Could not parse date {date_str} from filename {filename}")
             return None
     return None
+
+def extract_months_and_year_from_kra_filename(filename):
+    """
+    Extract months and year from KRA filename.
+    Example: 'KRA Milestones for June July August 2025' -> ['June', 'July', 'August'], 2025
+    """
+    # Pattern to match: KRA Milestones for [Month] [Month] [Month] [Year]
+    pattern = r'KRA Milestones for\s+(.*?)\s+(\d{4})'
+    match = re.search(pattern, filename, re.IGNORECASE)
+    
+    if match:
+        months_str = match.group(1)
+        year = int(match.group(2))
+        
+        # Extract month names
+        month_names = ["January", "February", "March", "April", "May", "June",
+                      "July", "August", "September", "October", "November", "December"]
+        
+        found_months = []
+        for month in month_names:
+            if month in months_str:
+                found_months.append(month)
+        
+        logger.info(f"Extracted from '{filename}': Months={found_months}, Year={year}")
+        return found_months, year
+    
+    return None, None
 
 def get_month_name(month_num):
     """Convert month number to month name"""
@@ -135,107 +166,166 @@ def get_month_number(month_name):
     }
     return months.get(month_name, 1)
 
-from datetime import datetime, timedelta
-from typing import List, Tuple
-
-def setup_dynamic_months(tracker_date: datetime) -> Tuple[List[str], str, datetime, List[Tuple[int, int]]]:
-    """
-    Dynamic setup for included months, including year-aware transitions.
-    Rules:
-    1. If tracker is in September → include June, July, August.
-    2. Otherwise → include previous, current, next months.
-    """
-    global MONTHS, MONTH_YEARS, TARGET_END_MONTH, TARGET_END_YEAR, TRACKER_DATE
-
-    months = [
-        'January', 'February', 'March', 'April', 'May', 'June',
-        'July', 'August', 'September', 'October', 'November', 'December'
-    ]
-
-    tracker_month = tracker_date.month
-    tracker_year = tracker_date.year
-
-    # ✅ Rule 1: September tracker → June–July–August (same year)
-    if tracker_month == 9:
-        MONTHS_DATA = [(6, tracker_year), (7, tracker_year), (8, tracker_year)]
-
-    # ✅ Rule 2: Otherwise previous–current–next (year-aware)
-    else:
-        prev_month_date = tracker_date.replace(day=1) - timedelta(days=1)
-        next_month_year = tracker_year + (1 if tracker_month == 12 else 0)
-        next_month_num = 1 if tracker_month == 12 else tracker_month + 1
-        next_month_date = tracker_date.replace(year=next_month_year, month=next_month_num, day=1)
-
-        MONTHS_DATA = [
-            (prev_month_date.month, prev_month_date.year),
-            (tracker_month, tracker_year),
-            (next_month_date.month, next_month_date.year)
-        ]
-
-    # Build labeled month list and set globals
-    MONTHS = [f"{months[m - 1]} {y}" for m, y in MONTHS_DATA]
+def get_latest_kra_file(cos):
+    """Get the latest KRA Milestones file from root of bucket"""
+    global WCC_KRA_KEY
     
-    # Build MONTH_YEARS mapping
-    MONTH_YEARS = {f"{months[m - 1]} {y}": y for m, y in MONTHS_DATA}
+    logger.info("=== FINDING LATEST KRA MILESTONES FILE ===")
+    logger.info(f"Searching in bucket: {BUCKET} (root level)")
     
-    TARGET_END_MONTH = months[MONTHS_DATA[-1][0] - 1]
-    TARGET_END_YEAR = MONTHS_DATA[-1][1]
-    TRACKER_DATE = tracker_date
+    # List all files in the bucket root (no folder prefix)
+    all_files = list_files_in_folder(cos, "")
+    logger.info(f"Found {len(all_files)} total files in {BUCKET} bucket")
     
-    TARGET_MONTH = MONTHS[-1]
-
-    return MONTHS, TARGET_MONTH, tracker_date, MONTHS_DATA
-
-def get_latest_tracker_paths(cos):
-    """Get the latest tracker file path for Wave City Club"""
-    global WCC_TRACKER_KEY
-    
-    logger.info("=== FINDING LATEST WAVE CITY CLUB TRACKER FILES ===")
-    
-    wcc_files = list_files_in_folder(cos, "Wave City Club/")
-    logger.info(f"Found {len(wcc_files)} files in Wave City Club folder")
-    
-    tracker_pattern = r'Structure Work Tracker.*\.xlsx$'
+    # Filter for KRA files at root level (not in subfolders)
+    kra_pattern = r'KRA Milestones for.*\.xlsx$'
     
     matching_files = []
-    latest_date = None
+    
+    for file_path in all_files:
+        # Skip files in subfolders (contain /)
+        if '/' in file_path:
+            continue
+            
+        filename = os.path.basename(file_path)
+        
+        if re.search(kra_pattern, filename, re.IGNORECASE):
+            logger.info(f"Found KRA file: {filename}")
+            months, year = extract_months_and_year_from_kra_filename(filename)
+            
+            if months and year:
+                # Use the last month and year to create a comparable date
+                last_month = months[-1]
+                month_num = get_month_number(last_month)
+                # Create a date object for comparison (use day=1)
+                file_date = datetime(year, month_num, 1)
+                matching_files.append((file_path, file_date, months, year))
+                logger.info(f"  -> Months: {months}, Year: {year}")
+            else:
+                logger.warning(f"Could not extract months/year from: {filename}")
+    
+    if matching_files:
+        # Get the most recent one based on year and last month
+        latest_file = max(matching_files, key=lambda x: x[1])
+        WCC_KRA_KEY = latest_file[0]
+        logger.info(f"✅ Latest KRA file: {WCC_KRA_KEY}")
+        logger.info(f"   Months: {latest_file[2]}, Year: {latest_file[3]}")
+        return latest_file[1]  # Return the date
+    else:
+        logger.error(f"❌ No KRA Milestones files found in bucket {BUCKET} root!")
+        raise Exception("Could not find latest KRA Milestones file")
+
+def determine_quarter_months_from_kra(kra_date):
+    """
+    Determine quarter months based on KRA file date.
+    The KRA date represents the last month in the quarter.
+    """
+    month = kra_date.month
+    year = kra_date.year
+    
+    # Determine the quarter based on the last month
+    if month in [6, 7, 8]:  # June, July, August quarter
+        return [
+            ("June", 6, year),
+            ("July", 7, year),
+            ("August", 8, year)
+        ]
+    elif month in [9, 10, 11]:  # September, October, November quarter
+        return [
+            ("September", 9, year),
+            ("October", 10, year),
+            ("November", 11, year)
+        ]
+    elif month in [12, 1, 2]:  # December, January, February quarter
+        # Handle year transition
+        dec_year = year if month == 12 else year - 1
+        jan_feb_year = year if month in [1, 2] else year + 1
+        return [
+            ("December", 12, dec_year),
+            ("January", 1, jan_feb_year),
+            ("February", 2, jan_feb_year)
+        ]
+    else:  # March, April, May quarter (months 3, 4, 5)
+        return [
+            ("March", 3, year),
+            ("April", 4, year),
+            ("May", 5, year)
+        ]
+
+def find_tracker_for_month(cos, month_name, month_num, year):
+    """
+    Find tracker file for a specific month in Wave City Club folder.
+    For a given month, we need tracker from the NEXT month.
+    E.g., for June data, we need tracker from July (DD-07-YYYY)
+    """
+    # Calculate the next month for tracker lookup
+    next_month = month_num + 1
+    tracker_year = year
+    
+    if next_month > 12:
+        next_month = 1
+        tracker_year = year + 1
+    
+    logger.info(f"Looking for tracker for {month_name} {year}: need tracker from month {next_month:02d}/{tracker_year}")
+    
+    # List files in Wave City Club folder
+    wcc_files = list_files_in_folder(cos, "Wave City Club/")
+    tracker_pattern = r'Structure Work Tracker.*\.xlsx$'
+    
+    matching_trackers = []
     
     for file_path in wcc_files:
         filename = os.path.basename(file_path)
         if re.search(tracker_pattern, filename, re.IGNORECASE):
             file_date = extract_date_from_filename(filename)
             if file_date:
-                matching_files.append((file_path, file_date))
-                logger.info(f"Found: {filename} with date {file_date.strftime('%d-%m-%Y')}")
-                
-                if latest_date is None or file_date > latest_date:
-                    latest_date = file_date
-            else:
-                logger.warning(f"Found matching file but no date: {filename}")
+                # Check if this tracker is from the correct month and year
+                if file_date.month == next_month and file_date.year == tracker_year:
+                    matching_trackers.append((file_path, file_date))
+                    logger.info(f"  Found matching tracker: {filename} ({file_date.strftime('%d-%m-%Y')})")
     
-    if matching_files:
-        latest_file = max(matching_files, key=lambda x: x[1])
-        WCC_TRACKER_KEY = latest_file[0]
-        logger.info(f"✅ Latest Wave City Club tracker: {WCC_TRACKER_KEY} ({latest_file[1].strftime('%d-%m-%Y')})")
+    if matching_trackers:
+        # Get the latest tracker from that month (in case there are multiple)
+        latest_tracker = max(matching_trackers, key=lambda x: x[1])
+        logger.info(f"  ✅ Selected tracker for {month_name}: {os.path.basename(latest_tracker[0])}")
+        return latest_tracker[0]
     else:
-        logger.error(f"❌ No Wave City Club tracker files found!")
-        WCC_TRACKER_KEY = None
+        logger.warning(f"  ⚠️ No tracker found for {month_name} {year} (looking for {next_month:02d}/{tracker_year})")
+        return None
+
+def setup_quarterly_configuration(cos):
+    """Setup configuration based on latest KRA file"""
+    global MONTHS, MONTH_YEARS, TARGET_END_MONTH, TARGET_END_YEAR, TRACKER_KEYS
     
-    logger.info(f"\n=== FINAL WAVE CITY CLUB TRACKER PATH ===")
-    logger.info(f"WCC_TRACKER_KEY: {WCC_TRACKER_KEY}")
-    logger.info(f"Latest tracker date found: {latest_date.strftime('%d-%m-%Y') if latest_date else 'None'}")
+    # Get latest KRA file from bucket root
+    kra_date = get_latest_kra_file(cos)
     
-    if latest_date:
-        setup_dynamic_months(latest_date)
-    else:
-        logger.error("No valid tracker date found - using default setup")
-        fallback_date = datetime.now()
-        setup_dynamic_months(fallback_date)
+    # Determine quarter months based on KRA
+    quarter_months = determine_quarter_months_from_kra(kra_date)
     
-    if not WCC_TRACKER_KEY:
-        raise Exception("Could not find latest Wave City Club tracker file")
+    # Setup global variables
+    MONTHS = [f"{name} {yr}" for name, num, yr in quarter_months]
+    MONTH_YEARS = {f"{name} {yr}": yr for name, num, yr in quarter_months}
     
-    return WCC_TRACKER_KEY
+    TARGET_END_MONTH = quarter_months[-1][0]
+    TARGET_END_YEAR = quarter_months[-1][2]
+    
+    logger.info(f"=== QUARTERLY CONFIGURATION ===")
+    logger.info(f"Months: {MONTHS}")
+    logger.info(f"Target end: {TARGET_END_MONTH} {TARGET_END_YEAR}")
+    
+    # Find trackers for each month in Wave City Club folder
+    TRACKER_KEYS = {}
+    for month_name, month_num, year in quarter_months:
+        tracker_key = find_tracker_for_month(cos, month_name, month_num, year)
+        month_label = f"{month_name} {year}"
+        TRACKER_KEYS[month_label] = tracker_key
+        if tracker_key:
+            logger.info(f"✅ Tracker mapped: {month_label} -> {os.path.basename(tracker_key)}")
+        else:
+            logger.warning(f"⚠️ No tracker for: {month_label}")
+    
+    return quarter_months
 
 # -----------------------------------------------------------------------------
 # UTILITIES
@@ -316,9 +406,24 @@ def detect_kra_column_mapping(sheet):
 
 def get_wcc_targets_from_kra(cos):
     """Extract targets from KRA file dynamically based on current months"""
+    # Download from bucket
     raw = download_file_bytes(cos, WCC_KRA_KEY)
     wb = load_workbook(filename=BytesIO(raw), data_only=True)
-    sheet = wb['Wave City Club targets till Aug']
+    
+    # Try to find the correct sheet
+    sheet = None
+    possible_sheet_names = ['Wave City Club targets till Aug', 'Sheet1', 'Targets', 'KRA', 'Wave City Club']
+    
+    for sheet_name in possible_sheet_names:
+        if sheet_name in wb.sheetnames:
+            sheet = wb[sheet_name]
+            logger.info(f"Using sheet: {sheet_name}")
+            break
+    
+    if sheet is None:
+        # Use first sheet as fallback
+        sheet = wb[wb.sheetnames[0]]
+        logger.info(f"Using first sheet: {wb.sheetnames[0]}")
     
     targets = {}
     logger.info("=== EXTRACTING TARGETS FROM KRA FILE ===")
@@ -343,12 +448,14 @@ def get_wcc_targets_from_kra(cos):
             block_name = str(block_cell.value).strip()
             month_activities = {}
             
-            for month in MONTHS:
-                col = month_to_col.get(month, "B")
+            for month_label in MONTHS:
+                # Extract month name without year
+                month_name = month_label.split()[0]
+                col = month_to_col.get(month_name, "B")
                 cell = sheet[f'{col}{row_num}']
                 activity = str(cell.value or '').strip() if cell.value else ''
-                month_activities[month] = activity
-                logger.info(f"Row {row_num}, {month}: Block='{block_name}', Activity='{activity}'")
+                month_activities[month_label] = activity
+                logger.info(f"Row {row_num}, {month_label}: Block='{block_name}', Activity='{activity}'")
             
             targets[block_name] = month_activities
     
@@ -369,6 +476,9 @@ def find_activity_progress_in_sheet(sheet, target_activity, sheet_name, block_na
         logger.info(f"SPECIAL CASE: {block_name} - enhanced search")
         max_rows = min(sheet.max_row, 60)
         
+        # Collect all matches with their row numbers and progress values
+        all_matches = []
+        
         for row_num in range(1, max_rows + 1):
             try:
                 activity_cell = sheet[f'G{row_num}']
@@ -378,14 +488,76 @@ def find_activity_progress_in_sheet(sheet, target_activity, sheet_name, block_na
                     if activities_match(target_activity, tracker_activity):
                         progress_cell = sheet[f'AC{row_num}']
                         ac_value = progress_cell.value
-                        logger.info(f"MATCH in G{row_num}: '{tracker_activity}', AC{row_num}: {ac_value}")
+                        
+                        # Also check the block identifier in column A or B
+                        block_cell_a = sheet[f'A{row_num}']
+                        block_cell_b = sheet[f'B{row_num}']
+                        
+                        block_identifier = None
+                        if block_cell_a.value:
+                            block_identifier = str(block_cell_a.value).strip()
+                        elif block_cell_b.value:
+                            block_identifier = str(block_cell_b.value).strip()
+                        
+                        logger.info(f"Found match at row {row_num}: '{tracker_activity}', Block: '{block_identifier}', AC: {ac_value}")
                         
                         if ac_value is not None:
-                            return extract_percentage(ac_value)
-                        return 0.0
+                            progress = extract_percentage(ac_value)
+                            all_matches.append({
+                                'row': row_num,
+                                'activity': tracker_activity,
+                                'block': block_identifier,
+                                'progress': progress
+                            })
             except Exception as e:
                 logger.debug(f"Error at row {row_num}: {e}")
                 continue
+        
+        # If we found multiple matches, try to find the best one
+        if all_matches:
+            logger.info(f"Found {len(all_matches)} matches for '{target_activity}'")
+            
+            # For Fine Dine, look for the match that is NOT in B1 rows
+            # (B1 activities typically have "B1" in their block identifier)
+            if 'Fine Dine' in block_name:
+                # Filter out B1 activities - look for rows that have "FI" or "Fine" or are NOT "B1" or "Bl"
+                non_b1_matches = []
+                for m in all_matches:
+                    if m['block']:
+                        block_upper = m['block'].upper()
+                        # Include if it contains FI or FINE, or if it doesn't contain B1/Bl
+                        if 'FI' in block_upper or 'FINE' in block_upper:
+                            non_b1_matches.append(m)
+                        elif 'B1' not in block_upper and 'BL' not in block_upper:
+                            non_b1_matches.append(m)
+                
+                if non_b1_matches:
+                    # Return the match with the highest progress
+                    best_match = max(non_b1_matches, key=lambda x: x['progress'])
+                    logger.info(f"✅ Selected Fine Dine match at row {best_match['row']}: {best_match['progress']}% (Block: {best_match['block']})")
+                    return best_match['progress']
+                else:
+                    logger.warning(f"Could not find specific Fine Dine match, using first match")
+            
+            # For Block 1 (B1) Banquet Hall, prefer B1 activities
+            if 'Block 1' in block_name or ('B1' in block_name and 'Fine' not in block_name):
+                b1_matches = []
+                for m in all_matches:
+                    if m['block']:
+                        block_upper = m['block'].upper()
+                        # Include if it contains B1 or Bl, but NOT FI or FINE
+                        if ('B1' in block_upper or 'BL' in block_upper) and 'FI' not in block_upper and 'FINE' not in block_upper:
+                            b1_matches.append(m)
+                
+                if b1_matches:
+                    best_match = max(b1_matches, key=lambda x: x['progress'])
+                    logger.info(f"✅ Selected B1 match at row {best_match['row']}: {best_match['progress']}% (Block: {best_match['block']})")
+                    return best_match['progress']
+            
+            # If we couldn't determine which one to use, return the one with highest progress
+            best_match = max(all_matches, key=lambda x: x['progress'])
+            logger.info(f"Selected best match at row {best_match['row']}: {best_match['progress']}%")
+            return best_match['progress']
         
         logger.warning(f"NO MATCH for '{target_activity}'")
         return 0.0
@@ -412,12 +584,31 @@ def find_activity_progress_in_sheet(sheet, target_activity, sheet_name, block_na
     logger.warning(f"NO MATCH for '{target_activity}'")
     return 0.0
 
-def get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key):
-    """Extract progress data from tracker file with ALL months displayed"""
-    raw = download_file_bytes(cos, tracker_key)
-    wb = load_workbook(filename=BytesIO(raw), data_only=True)
-    logger.info(f"Available tracker sheets: {wb.sheetnames}")
+def get_progress_from_specific_tracker(cos, tracker_key, block_name, activity, sheet_name):
+    """Get progress from a specific tracker file"""
+    if not tracker_key:
+        logger.warning(f"No tracker available, returning None")
+        return None
     
+    try:
+        # Download from bucket
+        raw = download_file_bytes(cos, tracker_key)
+        wb = load_workbook(filename=BytesIO(raw), data_only=True)
+        
+        if sheet_name not in wb.sheetnames:
+            logger.warning(f"Sheet '{sheet_name}' not found in tracker")
+            return None
+        
+        sheet = wb[sheet_name]
+        progress = find_activity_progress_in_sheet(sheet, activity, sheet_name, block_name)
+        return progress
+        
+    except Exception as e:
+        logger.error(f"Error reading tracker {tracker_key}: {e}")
+        return None
+
+def get_wcc_progress_from_trackers_quarterly(cos, targets):
+    """Extract progress data from multiple tracker files based on quarter"""
     progress_data = []
     milestone_counter = 1
     total_blocks = len(targets)
@@ -427,24 +618,37 @@ def get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key):
         logger.info(f"Processing block: {block_name}")
         
         sheet_name = BLOCK_MAPPING.get(block_name)
-        month_progress = {month: 0.0 for month in MONTHS}
+        month_progress = {}
         
         if not sheet_name:
             logger.warning(f"No sheet mapping for block: {block_name}")
-        elif sheet_name not in wb.sheetnames:
-            logger.warning(f"Sheet '{sheet_name}' not found")
+            # Set all months to None
+            for month_label in MONTHS:
+                month_progress[month_label] = None
         else:
-            sheet = wb[sheet_name]
-            for month in MONTHS:
-                if month in month_activities:
-                    activity = month_activities[month]
-                    month_progress[month] = find_activity_progress_in_sheet(
-                        sheet, activity, sheet_name, block_name
+            # Get progress from appropriate tracker for each month
+            for month_label in MONTHS:
+                tracker_key = TRACKER_KEYS.get(month_label)
+                activity = month_activities.get(month_label, '')
+                
+                if tracker_key:
+                    progress = get_progress_from_specific_tracker(
+                        cos, tracker_key, block_name, activity, sheet_name
                     )
+                    month_progress[month_label] = progress
+                    logger.info(f"{block_name} - {month_label}: {progress}%")
+                else:
+                    month_progress[month_label] = None
+                    logger.warning(f"{block_name} - {month_label}: No tracker available")
         
-        # Use the last month for weighted calculation
+        # Use the last month for weighted calculation (if available)
         last_month = MONTHS[-1] if MONTHS else ''
-        main_weighted = round((site_weighted * month_progress[last_month]) / 100, 3)
+        last_month_progress = month_progress.get(last_month)
+        
+        if last_month_progress is not None:
+            main_weighted = round((site_weighted * last_month_progress) / 100, 3)
+        else:
+            main_weighted = 0.0
         
         # Create row data with dynamic columns
         row_data = {
@@ -456,30 +660,34 @@ def get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key):
         }
         
         # Add month-specific columns
-        for month in MONTHS:
-            year = MONTH_YEARS[month]
-            target_val = month_activities.get(month, '')
-            progress_val = month_progress[month]
+        for month_label in MONTHS:
+            year = MONTH_YEARS[month_label]
+            month_name = month_label.split()[0]
+            target_val = month_activities.get(month_label, '')
+            progress_val = month_progress.get(month_label)
             
-            row_data[f'Target - {month}-{year}'] = target_val
-            row_data[f'% work done- {month} Status'] = f"{progress_val:.0f}%"
+            row_data[f'Target - {month_name}-{year}'] = target_val
             
-            if progress_val == 100:
-                achieved = target_val if target_val else f'No target for {month}'
-            elif progress_val == 0:
-                achieved = 'No progress' if target_val else f'No target for {month}'
+            # Handle missing tracker case
+            if progress_val is None:
+                row_data[f'% work done- {month_name} Status'] = 'No tracker'
+                row_data[f'Achieved- {month_name} {year}'] = 'No tracker available'
             else:
-                achieved = f'{progress_val:.0f}% completed'
+                row_data[f'% work done- {month_name} Status'] = f"{progress_val:.0f}%"
+                
+                if progress_val == 100:
+                    achieved = target_val if target_val else f'No target for {month_name}'
+                elif progress_val == 0:
+                    achieved = 'No progress' if target_val else f'No target for {month_name}'
+                else:
+                    achieved = f'{progress_val:.0f}% completed'
+                row_data[f'Achieved- {month_name} {year}'] = achieved
             
-            row_data[f'Achieved- {month} {year}'] = achieved
-            row_data[f'Responsible Person- {month}'] = ''
-            row_data[f'Delay Reasons- {month}'] = ''
+            row_data[f'Responsible Person- {month_name}'] = ''
+            row_data[f'Delay Reasons- {month_name}'] = ''
         
         progress_data.append(row_data)
         milestone_counter += 1
-        
-        month_info = ", ".join([f"{m}: {month_progress[m]:.1f}%" for m in MONTHS])
-        logger.info(f"Block {block_name} -> {month_info}")
     
     # Create DataFrame with dynamic columns
     columns = [
@@ -488,14 +696,15 @@ def get_wcc_progress_from_tracker_all_months(cos, targets, tracker_key):
         f'Target to be complete by {TARGET_END_MONTH}-{TARGET_END_YEAR}'
     ]
     
-    for month in MONTHS:
-        year = MONTH_YEARS[month]
+    for month_label in MONTHS:
+        year = MONTH_YEARS[month_label]
+        month_name = month_label.split()[0]
         columns.extend([
-            f'Target - {month}-{year}',
-            f'% work done- {month} Status',
-            f'Achieved- {month} {year}',
-            f'Responsible Person- {month}',
-            f'Delay Reasons- {month}'
+            f'Target - {month_name}-{year}',
+            f'% work done- {month_name} Status',
+            f'Achieved- {month_name} {year}',
+            f'Responsible Person- {month_name}',
+            f'Delay Reasons- {month_name}'
         ])
     
     columns.extend(['Site Weighted', 'Weighted progress against target'])
@@ -512,7 +721,7 @@ def write_wcc_excel_report_consolidated(df, filename):
     """Generate formatted Excel report with dynamic month columns"""
     wb = Workbook()
     ws = wb.active
-    ws.title = 'Wave City Club- Progress Against Milestones'
+    ws.title = 'Wave City Club- Progress'[:31]  # Excel sheet name limit
     
     # Add main title
     title_row = ["Wave City Club- Progress Against Milestones"]
@@ -648,59 +857,72 @@ def get_unique_filename(base_name):
         counter += 1
         new_name = f"{name}({counter}){ext}"
     return new_name
+
 # -----------------------------------------------------------------------------
 # MAIN FUNCTION
 # -----------------------------------------------------------------------------
 
 def main():
-    """Main execution function for dynamic report generation"""
-    logger.info("=== STARTING WAVE CITY CLUB REPORT WITH DYNAMIC MONTHS AND TRACKER SELECTION ===")
+    """Main execution function for quarterly report generation"""
+    logger.info("=== STARTING WAVE CITY CLUB QUARTERLY REPORT GENERATION ===")
     
     try:
         # Initialize COS client
         cos = init_cos()
         
-        # Get latest tracker path and setup dynamic months
-        get_latest_tracker_paths(cos)
+        # Setup quarterly configuration (finds KRA and determines months)
+        logger.info("\n=== STEP 1: Setting up quarterly configuration ===")
+        logger.info(f"Bucket: {BUCKET}")
+        logger.info(f"Looking for KRA files in bucket root")
+        logger.info(f"Looking for tracker files in Wave City Club/ folder")
+        quarter_months = setup_quarterly_configuration(cos)
         
-        # Verify that we have the required tracker path
-        if not WCC_TRACKER_KEY:
-            logger.error("❌ Failed to find Wave City Club tracker file")
-            return
+        logger.info(f"\n=== QUARTERLY CONFIGURATION COMPLETE ===")
+        logger.info(f"KRA File: {WCC_KRA_KEY}")
+        logger.info(f"Months: {MONTHS}")
+        logger.info(f"Target Period End: {TARGET_END_MONTH} {TARGET_END_YEAR}")
         
-        logger.info(f"Using months: {MONTHS}")
-        logger.info(f"All months will be processed and displayed")
+        logger.info(f"\n=== TRACKER FILES MAPPING ===")
+        for month_label, tracker_key in TRACKER_KEYS.items():
+            if tracker_key:
+                logger.info(f"✅ {month_label}: {os.path.basename(tracker_key)}")
+            else:
+                logger.info(f"⚠️ {month_label}: No tracker found")
         
-        # Get targets from KRA file with dynamic month support
-        logger.info("Fetching Wave City Club targets from KRA file for dynamic months...")
+        # Get targets from KRA file
+        logger.info("\n=== STEP 2: Fetching targets from KRA file ===")
         targets = get_wcc_targets_from_kra(cos)
+        logger.info(f"Extracted targets for {len(targets)} blocks")
         
-        # Extract progress data for all dynamic months
-        logger.info("Extracting progress data from tracker for ALL dynamic months...")
-        df = get_wcc_progress_from_tracker_all_months(cos, targets, WCC_TRACKER_KEY)
+        # Extract progress data from quarterly trackers
+        logger.info("\n=== STEP 3: Extracting progress data from trackers ===")
+        df = get_wcc_progress_from_trackers_quarterly(cos, targets)
         
-        # Generate dynamic report
+        # Generate report
+        logger.info("\n=== STEP 4: Generating Excel report ===")
         current_date_for_filename = datetime.now().strftime('%d-%m-%Y')
         base_filename = f"Wave_City_Club Milestone Report ({current_date_for_filename}).xlsx"
         filename = get_unique_filename(base_filename)
-
-        logger.info("Generating dynamic Excel report with ALL months")
+        
         write_wcc_excel_report_consolidated(df, filename)
         
-        logger.info("=== WAVE CITY CLUB REPORT GENERATION COMPLETE ===")
-        logger.info(f"Report saved as: {filename}")
+        logger.info("\n=== WAVE CITY CLUB QUARTERLY REPORT GENERATION COMPLETE ===")
+        logger.info(f"✅ Report saved as: {filename}")
         
         # Log summary
-        logger.info("Report Summary:")
-        logger.info(f"  Generated Months: {MONTHS}")
-        logger.info(f"  Processed Blocks: {len(targets)}")
-        logger.info(f"  All months displayed in the report")
+        logger.info("\n=== REPORT SUMMARY ===")
+        logger.info(f"Quarter Months: {MONTHS}")
+        logger.info(f"Processed Blocks: {len(targets)}")
+        logger.info(f"Trackers Used:")
+        for month_label, tracker_key in TRACKER_KEYS.items():
+            status = "✅ Available" if tracker_key else "⚠️ Missing"
+            logger.info(f"  {month_label}: {status}")
         
     except Exception as e:
         logger.error(f"Error in main execution: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         raise
 
 if __name__ == "__main__":
     main()
-
-

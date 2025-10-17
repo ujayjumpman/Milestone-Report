@@ -884,9 +884,6 @@
 
 
 
-
-
-
 import os
 import logging
 from io import BytesIO
@@ -1373,7 +1370,9 @@ def find_activity_in_tracker(tracker_ws, parent_activities, child_activity, towe
 def calculate_month_data(tower, month_name, month_col, kra_ws, tracker_cache, sheet_mapping, tower_structure, kra_year):
     """
     Calculate data for a specific month using the appropriate tracker.
-    SPECIAL HANDLING: Force NTA-02 June to 0%
+    SPECIAL HANDLING: 
+    - Force NTA-02 June to 0%
+    - Force "Ground floor roof slab casting" to 80% for August
     """
     activities = get_activities_from_kra(tower, month_col, kra_ws, tower_structure)
     
@@ -1398,6 +1397,22 @@ def calculate_month_data(tower, month_name, month_col, kra_ws, tracker_cache, sh
             'responsible': "",
             'delay': ""
         }
+    
+    # SPECIAL HANDLING: Force "Ground floor roof slab casting" to 80% for August
+    if month_name == "August":
+        child_activity = activities[-1] if activities else ""
+        child_activity_lower = str(child_activity).strip().lower()
+        
+        # Check if this activity matches "Ground floor roof slab casting"
+        if "ground floor" in child_activity_lower and "roof slab" in child_activity_lower and "casting" in child_activity_lower:
+            logger.info(f"[{tower}] Forcing August percentage to 80% for 'Ground floor roof slab casting' (special override)")
+            return {
+                'activities_text': activities_text,
+                'percentage': 80.0,
+                'progress_status': f"Achieved-{child_activity}",
+                'responsible': "",
+                'delay': ""
+            }
     
     tracker_month_num = MONTH_TO_TRACKER_MAPPING.get(month_name)
     
@@ -1443,6 +1458,21 @@ def calculate_month_data(tower, month_name, month_col, kra_ws, tracker_cache, sh
             'delay': ""
         }
     
+    tracker_ws = tracker_wb[tracker_sheet]
+    parent_activities = activities[:-1] if len(activities) > 1 else []
+    child_activity = activities[-1]
+    
+    pct, responsible, delay = find_activity_in_tracker(tracker_ws, parent_activities, child_activity, tower)
+    
+    progress_status = f"Achieved-{child_activity}" if pct > 0 else "No Progress"
+    
+    return {
+        'activities_text': activities_text,
+        'percentage': pct,
+        'progress_status': progress_status,
+        'responsible': responsible,
+        'delay': delay
+    }
     tracker_ws = tracker_wb[tracker_sheet]
     parent_activities = activities[:-1] if len(activities) > 1 else []
     child_activity = activities[-1]

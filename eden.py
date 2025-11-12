@@ -1569,6 +1569,11 @@ def generate_report(tower_targets: Dict[str, List[ActivityTarget]],
     sorted_tower_names = sorted(tower_targets.keys(), key=sort_towers)
     
     for tower_name in sorted_tower_names:
+        # Skip the standalone "NTA" row if it exists
+        if tower_name.strip().upper() == "NTA":
+            logger.info(f"\nSkipping: {tower_name} (not a valid tower)")
+            continue
+            
         logger.info(f"\nProcessing: {tower_name}")
         
         row_data = {'Tower': tower_name}
@@ -1585,8 +1590,8 @@ def generate_report(tower_targets: Dict[str, List[ActivityTarget]],
                 row_data[f"Activity- {month} {year}"] = ""
                 row_data[f"% Complete- {month}"] = ""
                 row_data[f"Status- {month}"] = ""
-                row_data[f"Responsible- {month}"] = ""
-                row_data[f"Delay- {month}"] = ""
+                row_data[f"Weightage- {month}"] = ""
+                row_data[f"Weighted %- {month}"] = ""
                 continue
             
             # We have targets - always show activity text
@@ -1642,26 +1647,67 @@ def generate_report(tower_targets: Dict[str, List[ActivityTarget]],
                 
                 row_data[f"% Complete- {month}"] = f"{avg_actual:.0f}%"
                 row_data[f"Status- {month}"] = status
+                
+                # Weightage and Weighted % for this month
+                weightage = 100  # Always 100 for all towers
+                weighted_pct = (avg_actual / weightage) * 100 if weightage > 0 else 0
+                row_data[f"Weightage- {month}"] = weightage
+                row_data[f"Weighted %- {month}"] = f"{weighted_pct:.0f}%"
             else:
                 # Tracker not available - leave data columns blank
                 logger.info(f"  {month}: Tracker not available - data columns left blank")
                 row_data[f"% Complete- {month}"] = ""
                 row_data[f"Status- {month}"] = ""
-            
-            # Responsible and Delay columns always blank (manual entry)
-            row_data[f"Responsible- {month}"] = ""
-            row_data[f"Delay- {month}"] = ""
+                row_data[f"Weightage- {month}"] = ""
+                row_data[f"Weighted %- {month}"] = ""
         
-        # Add summary columns
+        # Add summary columns at the end
         last_month = months[-1]
         last_targets = [t for t in tower_targets[tower_name] if t.month == last_month]
         row_data[f"Target till {last_month}"] = "\n".join([t.activity_text for t in last_targets])
         
-        weightage = 100 if not tower_name.startswith('NTA') else 50
-        row_data['Weightage'] = weightage
-        row_data['Weighted %'] = "0%"  # Placeholder
+        # Add single Responsible and Delay columns at the end (manual entry)
+        row_data['Responsible'] = ""
+        row_data['Delay Reason'] = ""
         
         report_rows.append(row_data)
+    
+    # Add summary row with averages at the end
+    summary_row = {'Tower': 'AVERAGE WEIGHTED %'}
+    
+    for month in months:
+        # Calculate average of Weighted % for this month across all towers
+        weighted_values = []
+        
+        for row in report_rows:
+            weighted_val = row.get(f"Weighted %- {month}", "")
+            if weighted_val and weighted_val != "":
+                try:
+                    # Remove % sign and convert to float
+                    val = float(str(weighted_val).replace('%', ''))
+                    weighted_values.append(val)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Calculate average
+        if weighted_values:
+            avg_weighted = sum(weighted_values) / len(weighted_values)
+            summary_row[f"Weighted %- {month}"] = f"{avg_weighted:.1f}%"
+        else:
+            summary_row[f"Weighted %- {month}"] = ""
+        
+        # Leave other columns blank for summary row
+        summary_row[f"Activity- {month} {year}"] = ""
+        summary_row[f"% Complete- {month}"] = ""
+        summary_row[f"Status- {month}"] = ""
+        summary_row[f"Weightage- {month}"] = ""
+    
+    # Add empty values for end columns
+    summary_row[f"Target till {months[-1]}"] = ""
+    summary_row['Responsible'] = ""
+    summary_row['Delay Reason'] = ""
+    
+    report_rows.append(summary_row)
     
     return pd.DataFrame(report_rows)
 
@@ -1669,6 +1715,8 @@ def format_report(worksheet, dataframe):
     """Apply formatting to report."""
     header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
     header_font = Font(bold=True, color="FFFFFF")
+    summary_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+    summary_font = Font(bold=True, size=11)
     
     # Format title
     worksheet.cell(1, 1).font = Font(bold=True, size=14)
@@ -1687,11 +1735,22 @@ def format_report(worksheet, dataframe):
         top=Side(style='thin'), bottom=Side(style='thin')
     )
     
+    # Last row is the summary row
+    summary_row_idx = worksheet.max_row
+    
     for row in range(5, worksheet.max_row + 1):
+        is_summary_row = (row == summary_row_idx)
+        
         for col in range(1, worksheet.max_column + 1):
             cell = worksheet.cell(row, col)
             cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
             cell.border = thin_border
+            
+            # Special formatting for summary row
+            if is_summary_row:
+                cell.fill = summary_fill
+                cell.font = summary_font
+                cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
     
     # Column widths
     for col_idx, column in enumerate(dataframe.columns, start=1):
@@ -1702,6 +1761,7 @@ def format_report(worksheet, dataframe):
             worksheet.column_dimensions[col_letter].width = 15
     
     worksheet.row_dimensions[4].height = 50
+    worksheet.row_dimensions[summary_row_idx].height = 30  # Make summary row slightly taller
 
 # ======================= MAIN =======================
 
@@ -1803,4 +1863,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

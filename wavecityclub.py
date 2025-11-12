@@ -381,7 +381,6 @@ def get_wcc_targets_from_kra(cos):
             continue
         
         # Stop if we hit another header row or non-block data
-        # Check if block name looks like a header (contains month names or is too short)
         block_name_str = str(block_name).strip()
         if any(month.lower() in block_name_str.lower() for month in ['january', 'february', 'march', 'april', 'may', 'june', 'july', 'august', 'september', 'october', 'november', 'december']):
             logger.info(f"Stopping at row {row_idx}: Found header-like content '{block_name_str}'")
@@ -422,10 +421,8 @@ def get_wcc_targets_from_kra(cos):
             validated_target_percent = None
             if target_percent and not pd.isna(target_percent):
                 try:
-                    # Try to convert to float
                     validated_target_percent = float(target_percent)
                 except (ValueError, TypeError):
-                    # If it's not a number (e.g., "October"), skip it
                     logger.warning(f"Invalid target % value for {block_name} - {month}: '{target_percent}' (not a number)")
                     validated_target_percent = None
             
@@ -481,11 +478,11 @@ def find_activity_completion_in_tracker(tracker_wb, sheet_name, target_activity)
 
 def get_wcc_progress_from_tracker_all_months(cos, targets):
     """
-    Extract progress data for all months with NEW LOGIC:
-    - For each activity, fetch target % and completed %
-    - If target % == completed %, display 100%
-    - Otherwise, display the completed % from tracker
-    - If tracker not available for a month, leave blank
+    Extract progress data for all months with UPDATED LOGIC:
+    - Weightage = 100 for all blocks
+    - Weighted % = (% Complete / Weightage) * 100 for each month
+    - If tracker % > target %, display 100%
+    - Responsible and Delay columns shown once at the end
     """
     global TRACKER_PATHS, LOADED_TRACKERS
     
@@ -511,8 +508,7 @@ def get_wcc_progress_from_tracker_all_months(cos, targets):
         
         row_data = {
             'Milestone': f'Milestone-{milestone_counter:02d}',
-            'Block': block_name,
-            'Site Weighted': 100.0 / len(targets)  # Equal weight for all blocks
+            'Block': block_name
         }
         
         # Determine the target to complete by the end of quarter
@@ -522,9 +518,6 @@ def get_wcc_progress_from_tracker_all_months(cos, targets):
         row_data[f'Target to be complete by {last_month}-{MONTH_YEARS[last_month]}'] = target_to_complete
         
         # Process each month
-        weighted_progress = 0.0
-        months_with_data = 0
-        
         for month in MONTHS:
             month_year = MONTH_YEARS[month]
             
@@ -537,8 +530,8 @@ def get_wcc_progress_from_tracker_all_months(cos, targets):
             target_col = f'Target - {month}-{month_year}'
             status_col = f'% work done- {month} Status'
             achieved_col = f'Achieved- {month} {month_year}'
-            responsible_col = f'Responsible Person- {month}'
-            delay_col = f'Delay Reasons- {month}'
+            weightage_col = f'Weightage- {month}'
+            weighted_pct_col = f'Weighted %- {month}'
             
             row_data[target_col] = target_activity if target_activity else 'No target'
             
@@ -547,19 +540,19 @@ def get_wcc_progress_from_tracker_all_months(cos, targets):
                 # Leave blank if tracker not available
                 row_data[status_col] = ''
                 row_data[achieved_col] = ''
-                row_data[responsible_col] = None
-                row_data[delay_col] = None
+                row_data[weightage_col] = ''
+                row_data[weighted_pct_col] = ''
                 continue
             
             # If no target activity, mark as N/A
             if not target_activity:
                 row_data[status_col] = 'N/A'
                 row_data[achieved_col] = 'No target for this month'
-                row_data[responsible_col] = None
-                row_data[delay_col] = None
+                row_data[weightage_col] = ''
+                row_data[weighted_pct_col] = ''
                 continue
             
-            # **NEW LOGIC: Fetch completed % from tracker**
+            # Fetch completed % from tracker
             tracker_wb = LOADED_TRACKERS[month]
             completed_percent = find_activity_completion_in_tracker(tracker_wb, tracker_sheet, target_activity)
             
@@ -569,8 +562,13 @@ def get_wcc_progress_from_tracker_all_months(cos, targets):
                 row_data[status_col] = '0%'
                 row_data[achieved_col] = 'Activity not found in tracker'
                 status_percent = 0.0
+            elif target_percent is not None and completed_percent > target_percent:
+                # Tracker % > Target % -> display 100%
+                row_data[status_col] = '100%'
+                row_data[achieved_col] = f'Target exceeded ({completed_percent*100:.0f}% > {target_percent*100:.0f}%)'
+                status_percent = 1.0
             elif target_percent is not None and completed_percent == target_percent:
-                # Target % matches completed % -> display 100%
+                # Target % matches completed %
                 row_data[status_col] = '100%'
                 row_data[achieved_col] = f'Target achieved ({completed_percent*100:.0f}% complete)'
                 status_percent = 1.0
@@ -586,19 +584,54 @@ def get_wcc_progress_from_tracker_all_months(cos, targets):
                 else:
                     row_data[achieved_col] = f'{completed_percent*100:.0f}% completed'
             
-            row_data[responsible_col] = None
-            row_data[delay_col] = None
-            
-            # Add to weighted progress
-            weighted_progress += status_percent
-            months_with_data += 1
+            # Calculate Weightage and Weighted % for this month
+            weightage = 100  # Always 100
+            weighted_pct = (status_percent * 100 / weightage) * 100 if weightage > 0 else 0
+            row_data[weightage_col] = weightage
+            row_data[weighted_pct_col] = f'{weighted_pct:.0f}%'
         
-        # Calculate average progress across months with data
-        avg_progress = weighted_progress / months_with_data if months_with_data > 0 else 0
-        row_data['Weighted progress against target'] = f'{(avg_progress * row_data["Site Weighted"]):.3f}%'
+        # Add Responsible and Delay columns once at the end
+        row_data['Responsible'] = ''
+        row_data['Delay Reason'] = ''
         
         data.append(row_data)
         milestone_counter += 1
+    
+    # Add summary row with average Weighted % for each month
+    summary_row = {'Milestone': 'AVERAGE WEIGHTED %', 'Block': ''}
+    summary_row[f'Target to be complete by {MONTHS[-1]}-{MONTH_YEARS[MONTHS[-1]]}'] = ''
+    
+    for month in MONTHS:
+        month_year = MONTH_YEARS[month]
+        
+        # Calculate average of Weighted % for this month
+        weighted_values = []
+        for row in data:
+            weighted_val = row.get(f'Weighted %- {month}', '')
+            if weighted_val and weighted_val != '':
+                try:
+                    val = float(str(weighted_val).replace('%', ''))
+                    weighted_values.append(val)
+                except (ValueError, TypeError):
+                    pass
+        
+        # Calculate average
+        if weighted_values:
+            avg_weighted = sum(weighted_values) / len(weighted_values)
+            summary_row[f'Weighted %- {month}'] = f'{avg_weighted:.1f}%'
+        else:
+            summary_row[f'Weighted %- {month}'] = ''
+        
+        # Leave other columns blank for summary row
+        summary_row[f'Target - {month}-{month_year}'] = ''
+        summary_row[f'% work done- {month} Status'] = ''
+        summary_row[f'Achieved- {month} {month_year}'] = ''
+        summary_row[f'Weightage- {month}'] = ''
+    
+    summary_row['Responsible'] = ''
+    summary_row['Delay Reason'] = ''
+    
+    data.append(summary_row)
     
     # Create DataFrame
     df = pd.DataFrame(data)
@@ -612,11 +645,11 @@ def get_wcc_progress_from_tracker_all_months(cos, targets):
             f'Target - {month}-{month_year}',
             f'% work done- {month} Status',
             f'Achieved- {month} {month_year}',
-            f'Responsible Person- {month}',
-            f'Delay Reasons- {month}'
+            f'Weightage- {month}',
+            f'Weighted %- {month}'
         ])
     
-    column_order.extend(['Site Weighted', 'Weighted progress against target'])
+    column_order.extend(['Responsible', 'Delay Reason'])
     
     df = df[column_order]
     
@@ -647,6 +680,7 @@ def write_wcc_excel_report_consolidated(df, filename):
     header_font = Font(name='Calibri', size=11, bold=True)
     normal_font = Font(name='Calibri', size=10)
     date_font = Font(name='Calibri', size=10, bold=True)
+    summary_font = Font(name='Calibri', size=11, bold=True)
     
     center = Alignment(horizontal='center', vertical='center', wrap_text=True)
     left = Alignment(horizontal='left', vertical='center', wrap_text=True)
@@ -660,6 +694,7 @@ def write_wcc_excel_report_consolidated(df, filename):
     
     light_grey_fill = PatternFill(start_color='D9D9D9', end_color='D9D9D9', fill_type='solid')
     light_blue_fill = PatternFill(start_color='B4C7E7', end_color='B4C7E7', fill_type='solid')
+    summary_fill = PatternFill(start_color='FFC000', end_color='FFC000', fill_type='solid')
     
     # Title row
     ws.merge_cells('A1:T1')
@@ -689,41 +724,6 @@ def write_wcc_excel_report_consolidated(df, filename):
         for c_idx, value in enumerate(row, start=1):
             cell = ws.cell(row=r_idx, column=c_idx, value=value)
     
-    # Add sum row
-    sum_row_num = ws.max_row + 1
-    ws.cell(row=sum_row_num, column=1, value=None)
-    ws.cell(row=sum_row_num, column=2, value=None)
-    
-    # Calculate sum for "Site Weighted" column (second to last column)
-    site_weighted_col = len(df.columns) - 1
-    ws.cell(row=sum_row_num, column=site_weighted_col, value='Sum')
-    
-    # Sum for "Weighted progress against target"
-    weighted_col = len(df.columns)
-    
-    # Extract numeric values and sum
-    total_weighted = 0.0
-    for row_num in range(6, sum_row_num):
-        cell_value = ws.cell(row=row_num, column=weighted_col).value
-        if cell_value and isinstance(cell_value, str) and '%' in cell_value:
-            try:
-                numeric_value = float(cell_value.replace('%', ''))
-                total_weighted += numeric_value
-            except ValueError:
-                pass
-    
-    ws.cell(row=sum_row_num, column=weighted_col, value=f'{total_weighted:.3f}%')
-    
-    # Apply styles
-    ws['A1'].font = Font(name='Calibri', size=14, bold=True)
-    ws['A1'].alignment = center
-    
-    ws['A2'].font = date_font
-    ws['A2'].alignment = center
-    
-    ws['A3'].font = date_font
-    ws['A3'].alignment = center
-    
     # Style header row (row 5)
     header_row = 5
     for cell in ws[header_row]:
@@ -734,7 +734,8 @@ def write_wcc_excel_report_consolidated(df, filename):
     
     # Style data rows
     data_start = 6
-    data_end = ws.max_row - 1
+    summary_row_idx = ws.max_row
+    data_end = summary_row_idx - 1
     
     for row_num in range(data_start, data_end + 1):
         for col_num in range(1, len(df.columns) + 1):
@@ -748,12 +749,12 @@ def write_wcc_excel_report_consolidated(df, filename):
             else:
                 cell.alignment = center
     
-    # Style sum row
+    # Style summary row (last row)
     for col_num in range(1, len(df.columns) + 1):
-        cell = ws.cell(row=sum_row_num, column=col_num)
-        cell.font = header_font
+        cell = ws.cell(row=summary_row_idx, column=col_num)
+        cell.font = summary_font
         cell.border = border
-        cell.fill = light_blue_fill
+        cell.fill = summary_fill
         cell.alignment = center
     
     # Dynamic column width adjustment
@@ -775,6 +776,7 @@ def write_wcc_excel_report_consolidated(df, filename):
     ws.row_dimensions[3].height = 20
     for i in range(5, ws.max_row + 1):
         ws.row_dimensions[i].height = 25
+    ws.row_dimensions[summary_row_idx].height = 30  # Make summary row taller
     
     wb.save(filename)
     logger.info(f'Report saved to {filename}')
@@ -859,7 +861,7 @@ def main():
             logger.error("❌ Failed to generate progress data")
             return
         
-        logger.info(f"✅ Generated progress data for {len(df)} milestones")
+        logger.info(f"✅ Generated progress data for {len(df)-1} milestones + 1 summary row")
         
         # Step 5.5: Apply manual overrides
         logger.info("\n=== STEP 5.5: Applying Manual Overrides ===")
@@ -892,7 +894,7 @@ def main():
                 logger.info(f"    - {month} {MONTH_YEARS[month]}: {os.path.basename(tracker)} (dated {tracker_date.strftime('%d-%m-%Y') if tracker_date else 'Unknown'})")
             else:
                 logger.info(f"    - {month} {MONTH_YEARS[month]}: Not Available (column will be blank)")
-        logger.info(f"  Total Milestones: {len(df)}")
+        logger.info(f"  Total Milestones: {len(df)-1} + 1 summary row")
         
     except Exception as e:
         logger.error(f"❌ Error in main execution: {e}")

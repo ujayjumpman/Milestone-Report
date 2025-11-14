@@ -228,7 +228,6 @@ class DynamicKRAParser:
                         break
                 
                 if has_data:
-                    # ===== UPDATED: Extract unit from actual cell values =====
                     unit = 'Flat'  # default
                     
                     # Check cells in this row for unit information
@@ -240,7 +239,6 @@ class DynamicKRAParser:
                             break
                     
                     activities.append({'name': activity_name, 'row': row_idx, 'unit': unit})
-                    # =========================================================
         else:
             for row_idx in range(header_row + 1, min(header_row + 50, sheet.max_row + 1)):
                 cell = sheet.cell(row=row_idx, column=1)
@@ -265,7 +263,6 @@ class DynamicKRAParser:
                         break
                 
                 if has_data:
-                    # ===== UPDATED: Extract unit from actual cell values =====
                     unit = 'Flat'  # default
                     
                     # Check cells in this row for unit information
@@ -277,7 +274,6 @@ class DynamicKRAParser:
                             break
                     
                     activities.append({'name': activity_name, 'row': row_idx, 'unit': unit})
-                    # =========================================================
         
         return activities
     
@@ -309,12 +305,10 @@ class DynamicKRAParser:
             
             if not activities:
                 logger.warning(f"No activities found for {section_name}")
-                # Still add the section with empty activities
                 activities = []
             
             logger.info(f"Found {len(activities)} activities")
             
-            # Log detected units
             for activity in activities:
                 logger.info(f"  - {activity['name']}: unit={activity['unit']}")
             
@@ -686,11 +680,9 @@ class StructureWorkParser:
                             year = parsed_date.year
                             logger.info(f"{floor_str}: {date_str} (month {month})")
                             
-                            # ===== NEW: Filter by BOTH month AND year =====
                             if target_month_num is None or month == target_month_num:
                                 if tracker_year is None or year == tracker_year:
                                     green_dates_list.append(parsed_date)
-                            # =============================================
         
         logger.info(f"Found {green_cells_found} green cells | Extracted {len(green_dates_list)} dates")
         return green_dates_list
@@ -792,7 +784,6 @@ class VerdiaReportGenerator:
             logger.info(f"\nLooking for: {tracker_pattern}")
             
             for idx, report_month in enumerate(self.quarter_months):
-                # Get the tracker month - this is the month AFTER the report month
                 tracker_month = self.tracker_months[idx]
                 tracker_month_num = MONTH_TO_NUM.get(tracker_month)
                 
@@ -819,76 +810,73 @@ class VerdiaReportGenerator:
                     logger.warning(f"{report_month} (tracker: {tracker_month}): Not found")
     
     def _parse_tracker(self, tracker_file, section_name, activities, is_structure, report_month=None):
-         """Parse tracker file and return (counts, data_type)"""
-         try:
-             raw = download_file(self.cos, tracker_file)
-             
-             if is_structure:
-                 logger.info(f"Parser: STRUCTURE WORK")
-                 
-                 report_month_num = MONTH_TO_NUM.get(report_month)
-                 logger.info(f"Extracting green dates for: {report_month} (month {report_month_num})")
-                 
-                 # Extract tracker file year
-                 file_date = extract_date_from_filename(tracker_file)
-                 tracker_file_year = file_date.year if file_date else None
-                 logger.info(f"Tracker file year: {tracker_file_year}")
-                 
-                 # Parse for SPECIFIC month and year
-                 green_dates = StructureWorkParser.parse_green_dates(
-                     BytesIO(raw), 
-                     section_name, 
-                     report_month_num,
-                     tracker_year=tracker_file_year
-                 )
-                 
-                 # If no dates found, log warning but DON'T fall back to all dates
-                 if not green_dates:
-                     logger.warning(f"No green dates found for {report_month} {tracker_file_year}")
-                 else:
-                     self.structure_green_dates[report_month] = green_dates
-                     logger.info(f"Found {len(green_dates)} green dates for {report_month}")
-                 
-                 tracker_counts = {'Slab Casting': len(green_dates)}
-                 return tracker_counts, 'count'
-                 
-             elif 'External Development' in section_name:
-                 logger.info(f"Parser: EXTERNAL DEVELOPMENT")
-                 
-                 kra_targets = self.kra_data.get(section_name, {}).get('targets', {})
-                 
-                 tracker_percentages = ExternalDevelopmentParser.parse_with_targets(
-                     BytesIO(raw), 
-                     activities, 
-                     kra_targets
-                 )
-                 
-                 tracker_counts = {}
-                 for activity in activities:
-                     act_name = activity['name']
-                     if act_name in tracker_percentages:
-                         tracker_counts[act_name] = tracker_percentages[act_name]
-                     else:
-                         tracker_counts[act_name] = 0
-                 
-                 logger.info(f"External Development data type: percentage")
-                 return tracker_counts, 'percentage'
-             
-             else:
-                 logger.info(f"Parser: TOWER")
-                 month_num = MONTH_TO_NUM.get(report_month)
-                 if not month_num:
-                     logger.warning(f"No valid month")
-                     return {act['name']: 0 for act in activities}, 'count'
-                 
-                 tracker_counts, data_type = TowerTrackerParser.parse(BytesIO(raw), activities, month_num)
-                 return tracker_counts, data_type
-         
-         except Exception as e:
-             logger.error(f"Error: {e}")
-             import traceback
-             logger.debug(traceback.format_exc())
-             return {act['name']: 0 for act in activities}, 'count'
+        """Parse tracker file and return (counts, data_type)"""
+        try:
+            raw = download_file(self.cos, tracker_file)
+            
+            if is_structure:
+                logger.info(f"Parser: STRUCTURE WORK")
+                
+                report_month_num = MONTH_TO_NUM.get(report_month)
+                logger.info(f"Extracting green dates for: {report_month} (month {report_month_num})")
+                
+                file_date = extract_date_from_filename(tracker_file)
+                tracker_file_year = file_date.year if file_date else None
+                logger.info(f"Tracker file year: {tracker_file_year}")
+                
+                green_dates = StructureWorkParser.parse_green_dates(
+                    BytesIO(raw), 
+                    section_name, 
+                    report_month_num,
+                    tracker_year=tracker_file_year
+                )
+                
+                if not green_dates:
+                    logger.warning(f"No green dates found for {report_month} {tracker_file_year}")
+                else:
+                    self.structure_green_dates[report_month] = green_dates
+                    logger.info(f"Found {len(green_dates)} green dates for {report_month}")
+                
+                tracker_counts = {'Slab Casting': len(green_dates)}
+                return tracker_counts, 'count'
+                
+            elif 'External Development' in section_name:
+                logger.info(f"Parser: EXTERNAL DEVELOPMENT")
+                
+                kra_targets = self.kra_data.get(section_name, {}).get('targets', {})
+                
+                tracker_percentages = ExternalDevelopmentParser.parse_with_targets(
+                    BytesIO(raw), 
+                    activities, 
+                    kra_targets
+                )
+                
+                tracker_counts = {}
+                for activity in activities:
+                    act_name = activity['name']
+                    if act_name in tracker_percentages:
+                        tracker_counts[act_name] = tracker_percentages[act_name]
+                    else:
+                        tracker_counts[act_name] = 0
+                
+                logger.info(f"External Development data type: percentage")
+                return tracker_counts, 'percentage'
+            
+            else:
+                logger.info(f"Parser: TOWER")
+                month_num = MONTH_TO_NUM.get(report_month)
+                if not month_num:
+                    logger.warning(f"No valid month")
+                    return {act['name']: 0 for act in activities}, 'count'
+                
+                tracker_counts, data_type = TowerTrackerParser.parse(BytesIO(raw), activities, month_num)
+                return tracker_counts, data_type
+        
+        except Exception as e:
+            logger.error(f"Error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            return {act['name']: 0 for act in activities}, 'count'
     
     def build_report_data(self):
         """Build report data from trackers"""
@@ -936,8 +924,9 @@ class VerdiaReportGenerator:
         
         return report_dfs
     
+    
     def _build_dataframe(self, section_name, activities, targets, counts, data_types, 
-                    activity_tracker_months=None, months_with_tracker=None):
+                        activity_tracker_months=None, months_with_tracker=None):
         """Build milestone dataframe - show all KRA targets, only cumulate with trackers"""
         data = []
         total_acts = len(activities)
@@ -950,17 +939,20 @@ class VerdiaReportGenerator:
         if months_with_tracker is None:
             months_with_tracker = {act['name']: [] for act in activities}
     
+        delay_reasons_col_name = f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}"
+    
         for i, activity in enumerate(activities):
             name = activity['name']
             unit = activity.get('unit', 'Flat')
             unit_plural = f"{unit}s"
     
+            # Initialize row with all columns set to empty strings
             row = {
                 "Milestone": f"{i+1:02d}",
                 "Activity": name,
                 "Weightage": weightage,
                 "Weighted Delay against Targets": "",
-                f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}": "",
+                delay_reasons_col_name: "",  # ALWAYS BLANK
             }
     
             total_target = 0
@@ -997,7 +989,6 @@ class VerdiaReportGenerator:
                 row["Target"] = f"{display_target}% by {display_month}"
     
             else:
-                # For non-external: show ALL targets from KRA for all months
                 for month in self.quarter_months:
                     target = int(targets[name].get(month, 0))
                     total_target += target
@@ -1009,7 +1000,7 @@ class VerdiaReportGenerator:
             cum_done = 0
             cum_target = 0
             total_achieved = 0
-            last_pct = None  # None means "no tracker data seen yet"
+            last_pct = None
             any_tracker_seen = False
     
             for month in self.quarter_months:
@@ -1017,26 +1008,20 @@ class VerdiaReportGenerator:
                 month_target = targets[name].get(month, 0)
     
                 if is_external:
-                    # Determine if a tracker exists for this activity-month
                     tracker_exists = month in months_available
                 
                     if not tracker_exists:
-                        # No tracker — show blanks
                         row[f"% Work Done against Target-Till {month}"] = ""
                         row[f"Target achieved in {month}"] = ""
                         continue
                 
-                    # Tracker exists -> treat month_done (may be None or numeric)
                     any_tracker_seen = True
                 
                     if data_is_percentage:
                         pct = float(month_done or 0.0)
                         pct = min(max(pct, 0.0), 100.0)
-                        # FIX: For external work, the TARGET is typically 100% completion
-                        # The KRA target (month_target) represents the target percentage
                         target_pct = float(month_target) if month_target else 100.0
                     else:
-                        # month_target interpreted as percent target for external
                         if month_target and month_target > 0:
                             pct = float(month_done) if month_done is not None else 0.0
                         else:
@@ -1046,9 +1031,6 @@ class VerdiaReportGenerator:
                     pct = round(pct, 2)
                     target_pct = round(target_pct, 2)
                 
-                    # MAP the work done percentage to target percentage
-                    # If target is 100%, work done of 90% achieves 90% of target
-                    # If target is 80%, work done of 90% exceeds target (show as achieved)
                     achievement_against_target = min((pct / target_pct * 100), 100) if target_pct > 0 else 0
                     achievement_against_target = round(achievement_against_target, 2)
                 
@@ -1058,7 +1040,6 @@ class VerdiaReportGenerator:
                     last_pct = achievement_against_target
     
                 else:
-                    # Non-external behavior (unchanged): if tracker exists (month_done not None), accumulate
                     if month_done is not None:
                         month_done = int(month_done)
                         month_target = int(month_target)
@@ -1067,7 +1048,6 @@ class VerdiaReportGenerator:
                         cum_target += month_target
                         total_achieved += month_done
     
-                        # Calculate percentage only from accumulated data (with trackers)
                         pct = 0.0 if cum_target == 0 else (cum_done / cum_target) * 100
                         pct = min(pct, 100.0)
                         pct = round(pct, 2)
@@ -1076,36 +1056,51 @@ class VerdiaReportGenerator:
                         row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
                         last_pct = pct
                     else:
-                        # NO TRACKER for this month => leave percentage blank, show target count
                         row[f"% Work Done against Target-Till {month}"] = ""
                         month_target = int(month_target)
                         row[f"Target achieved in {month}"] = f"0 out of {month_target} {unit_plural}"
     
-            # Finalize Total achieved & Weighted Delay only if at least one tracker-month was present (for external),
-            # or if non-external computed something (last_pct not None)
+            # Calculate Weighted Delay (only if tracker data exists)
             if is_external:
                 if any_tracker_seen:
                     row["Total achieved"] = f"{int(total_achieved) if total_achieved == int(total_achieved) else total_achieved}%"
-                    row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%" if last_pct is not None and last_pct != 0 else ""
+                    if last_pct is not None and last_pct != 0:
+                        row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+                    else:
+                        row["Weighted Delay against Targets"] = ""
                 else:
                     row["Total achieved"] = ""
                     row["Weighted Delay against Targets"] = ""
             else:
                 row["Total achieved"] = f"{int(total_achieved)} {unit_plural}"
-                row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%" if last_pct is not None else ""
+                if last_pct is not None:
+                    row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+                else:
+                    row["Weighted Delay against Targets"] = ""
+            
+            # CRITICAL: ALWAYS keep Delay Reasons blank
+            row[delay_reasons_col_name] = ""
     
             data.append(row)
     
+        # Build column order carefully
         cols = ["Milestone", "Activity", "Target"]
+        
+        # Add % Work Done columns for each month
         for m in self.quarter_months:
             cols.append(f"% Work Done against Target-Till {m}")
-        cols.extend(["Weightage", "Weighted Delay against Targets"])
+        
+        # Add summary columns
+        cols.extend(["Weightage", "Weighted Delay against Targets", "Total achieved"])
+        
+        # Add Target achieved columns for each month
         for m in self.quarter_months:
             cols.append(f"Target achieved in {m}")
-        cols.extend(["Total achieved", f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}"])
+        
+        # Add Delay Reasons column at the END
+        cols.append(delay_reasons_col_name)
     
         return pd.DataFrame(data, columns=cols)
-
         
     def _sort_sections(self, sections):
         """Sort sections: Structure, Towers, External"""
@@ -1168,16 +1163,13 @@ class VerdiaReportGenerator:
         for section_name in sorted_report_dfs.keys():
             df = sorted_report_dfs[section_name]
             
-            # UPDATED: Show section header even if dataframe is empty
             ws.append([f"{section_name} Progress Against Milestones"])
             title_row = ws.max_row
             
-            # Determine number of columns for merge (even if df is empty, use standard column count)
             if not df.empty:
                 num_cols = len(df.columns)
             else:
-                # For empty dataframes, create standard columns
-                num_cols = 11  # Adjust based on your typical column count
+                num_cols = 11
             
             ws.merge_cells(f'A{title_row}:{get_column_letter(num_cols)}{title_row}')
             ws[f'A{title_row}'].font = bold
@@ -1185,7 +1177,6 @@ class VerdiaReportGenerator:
             ws[f'A{title_row}'].alignment = center
             
             if df.empty:
-                # Show headers for empty section
                 header_cols = ["Milestone", "Activity", "Target"]
                 for m in self.quarter_months:
                     header_cols.append(f"% Work Done against Target-Till {m}")
@@ -1205,7 +1196,6 @@ class VerdiaReportGenerator:
                 
                 logger.warning(f"No activities found for {section_name}")
             else:
-                # Original behavior for non-empty dataframes
                 for r in dataframe_to_rows(df, index=False, header=True):
                     ws.append(r)
                 
@@ -1221,11 +1211,11 @@ class VerdiaReportGenerator:
                         cell.alignment = center if cell.column > 2 else left
                 
                 try:
-                    total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"])
+                    total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"] if v and str(v).strip() != "")
                 except:
                     total_delay = 0
                 
-                ws.append(["Total Delay"] + [""] * (len(df.columns) - 2) + [f"{round(total_delay, 2)}%"])
+                ws.append(["Total Delay"])
                 total_row = ws.max_row
                 for cell in ws[total_row]:
                     cell.font = bold

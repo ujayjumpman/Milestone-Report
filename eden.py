@@ -1,7 +1,4 @@
-# """
-# Automated Milestone Report Generator - FIXED VERSION
-# Hardcoded column numbers for stability, improved activity parsing
-# """
+
 
 # import os
 # import logging
@@ -384,13 +381,32 @@
 #     text = re.sub(r'[^\w\s]', ' ', text)
 #     return ' '.join(text.split())
 
-# def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str) -> Optional[float]:
+# def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, month: str = None) -> Optional[float]:
 #     """
 #     Find matching activity in tracker and return % complete.
 #     Uses Column G (TRACKER_PCT_COMPLETE_COL = 7) for % Complete.
     
+#     SPECIAL OVERRIDE: NTA-05 October "Lower Basement, Column/Shear Wall, Checking & Casting Work" = 80%
+    
 #     HIERARCHICAL MATCHING: Find parent level first, then search for child within next 10 rows.
 #     """
+#     # ============= HARDCODED OVERRIDE FOR NTA-05 OCTOBER =============
+#     tower_normalized = tower_name.replace(" ", "").upper()
+#     is_nta05 = tower_normalized in ["NTA05", "NTA5", "NTA-05", "NTA-5"]
+#     is_october = month == "October"
+    
+#     if is_nta05 and is_october:
+#         activity_normalized = normalize_text(activity_text)
+#         # Check if this is the specific activity
+#         has_lower_basement = "lower" in activity_normalized and "basement" in activity_normalized
+#         has_column_shear = ("column" in activity_normalized or "shear" in activity_normalized)
+#         has_checking_casting = ("checking" in activity_normalized and "casting" in activity_normalized) or "checking casting" in activity_normalized
+        
+#         if has_lower_basement and has_column_shear and has_checking_casting:
+#             logger.info(f"    ✓✓✓ HARDCODED OVERRIDE: NTA-05 October activity = 80% ✓✓✓")
+#             return 80.0
+#     # ================================================================
+    
 #     # Find tower sheet
 #     tower_sheet = None
 #     for sheet_name in tracker_wb.sheetnames:
@@ -532,133 +548,6 @@
 #                 pass
         
 #         return None
-#     """
-#     Find matching activity in tracker and return % complete.
-#     Uses Column G (TRACKER_PCT_COMPLETE_COL = 7) for % Complete.
-    
-#     Improved hierarchical matching: First line terms are CRITICAL and must all match.
-#     """
-#     # Find tower sheet
-#     tower_sheet = None
-#     for sheet_name in tracker_wb.sheetnames:
-#         if tower_name.replace("Tower ", "").replace("NTA ", "") in sheet_name:
-#             tower_sheet = tracker_wb[sheet_name]
-#             break
-    
-#     if not tower_sheet:
-#         logger.debug(f"    Sheet not found for {tower_name}")
-#         return None
-    
-#     # Split activity text into lines (hierarchy levels)
-#     activity_lines = [line.strip() for line in activity_text.split('\n') if line.strip()]
-    
-#     # CRITICAL: First line must match EXACTLY (as a phrase)
-#     # "Upper Basement" should NOT match "Lower Basement"
-#     critical_line = ""
-#     if activity_lines:
-#         critical_line = normalize_text(activity_lines[0])
-    
-#     # Get all search terms from all lines for overall scoring
-#     all_search_terms = []
-#     for line in activity_lines:
-#         normalized = normalize_text(line)
-#         words = [w for w in normalized.split() if len(w) > 2]
-#         all_search_terms.extend(words)
-    
-#     logger.debug(f"    Searching in {tower_sheet.title}")
-#     logger.debug(f"    Activity: {' → '.join(activity_lines)}")
-#     logger.debug(f"    CRITICAL phrase (must match exactly): '{critical_line}'")
-#     logger.debug(f"    All search terms: {all_search_terms}")
-    
-#     # Identify conflicting location terms to explicitly exclude
-#     conflicting_terms = []
-#     search_text_full = ' '.join([normalize_text(line) for line in activity_lines])
-    
-#     # Define conflicting pairs
-#     conflict_pairs = [
-#         ('upper', 'lower'),
-#         ('lower', 'upper'),
-#         ('ground', '1st'),
-#         ('ground', '2nd'),
-#         ('ground', '3rd'),
-#         ('1st', '2nd'),
-#         ('1st', '3rd'),
-#         ('2nd', '1st'),
-#         ('2nd', '3rd'),
-#         ('3rd', '1st'),
-#         ('3rd', '2nd'),
-#     ]
-    
-#     # Find which conflicts to check for
-#     for our_term, their_term in conflict_pairs:
-#         if our_term in search_text_full:
-#             conflicting_terms.append(their_term)
-    
-#     logger.debug(f"    Will reject if contains: {conflicting_terms}")
-    
-#     # Search through tracker rows
-#     best_match = None
-#     best_match_score = 0
-#     best_match_row = None
-    
-#     for row_idx in range(3, tower_sheet.max_row + 1):
-#         task_name = tower_sheet.cell(row_idx, TRACKER_TASK_NAME_COL).value
-        
-#         if not task_name:
-#             continue
-        
-#         task_normalized = normalize_text(task_name)
-        
-#         # STEP 0: Check for conflicting location terms
-#         has_conflict = False
-#         for conflict_term in conflicting_terms:
-#             if conflict_term in task_normalized:
-#                 logger.debug(f"    REJECTED row {row_idx}: contains conflicting term '{conflict_term}': {task_name[:50]}...")
-#                 has_conflict = True
-#                 break
-        
-#         if has_conflict:
-#             continue  # Skip this row entirely
-        
-#         # STEP 1: Check if the COMPLETE critical line/phrase is present
-#         # "upper basement" must be in the task, not just "basement"
-#         if critical_line and critical_line not in task_normalized:
-#             # Critical phrase not found, skip this row
-#             continue
-        
-#         # STEP 2: Count all matching terms (for overall match quality)
-#         total_match_count = sum(1 for term in all_search_terms if term in task_normalized)
-        
-#         # Calculate match percentage
-#         match_percentage = total_match_count / len(all_search_terms) if all_search_terms else 0
-        
-#         # Need at least 70% of ALL terms to match
-#         if match_percentage >= 0.7 and total_match_count > best_match_score:
-#             # Get % Complete from Column G
-#             pct_value = tower_sheet.cell(row_idx, TRACKER_PCT_COMPLETE_COL).value
-            
-#             if pct_value is not None:
-#                 try:
-#                     # Handle different formats
-#                     if isinstance(pct_value, (int, float)):
-#                         pct_complete = float(pct_value) * 100
-#                     else:
-#                         pct_complete = float(str(pct_value).replace('%', ''))
-                    
-#                     if 0 <= pct_complete <= 100:
-#                         best_match_score = total_match_count
-#                         best_match = pct_complete
-#                         best_match_row = row_idx
-#                         logger.debug(f"    Match: row {row_idx}, score={total_match_count}/{len(all_search_terms)} ({match_percentage*100:.0f}%): {task_name[:60]}... = {pct_complete:.1f}%")
-#                 except (ValueError, TypeError):
-#                     pass
-    
-#     if best_match is not None:
-#         logger.debug(f"    ✓ SELECTED: row {best_match_row}, {best_match:.1f}%")
-#     else:
-#         logger.debug(f"    ✗ NO MATCH (need: exact critical phrase + 70%+ overall)")
-    
-#     return best_match
 
 # # ======================= REPORT GENERATION =======================
 
@@ -707,6 +596,11 @@
 #     sorted_tower_names = sorted(tower_targets.keys(), key=sort_towers)
     
 #     for tower_name in sorted_tower_names:
+#         # Skip the standalone "NTA" row if it exists
+#         if tower_name.strip().upper() == "NTA":
+#             logger.info(f"\nSkipping: {tower_name} (not a valid tower)")
+#             continue
+            
 #         logger.info(f"\nProcessing: {tower_name}")
         
 #         row_data = {'Tower': tower_name}
@@ -723,8 +617,8 @@
 #                 row_data[f"Activity- {month} {year}"] = ""
 #                 row_data[f"% Complete- {month}"] = ""
 #                 row_data[f"Status- {month}"] = ""
-#                 row_data[f"Responsible- {month}"] = ""
-#                 row_data[f"Delay- {month}"] = ""
+#                 row_data[f"Weightage- {month}"] = ""
+#                 row_data[f"Weighted %- {month}"] = ""
 #                 continue
             
 #             # We have targets - always show activity text
@@ -740,25 +634,34 @@
 #                 matched = 0
                 
 #                 for target in month_targets:
-#                     # Find in tracker
-#                     actual_pct = find_activity_in_tracker(tracker_wb, tower_name, target.activity_text)
+#                     # Find in tracker - PASS THE MONTH to enable hardcoded override
+#                     actual_pct = find_activity_in_tracker(tracker_wb, tower_name, target.activity_text, month)
                     
 #                     if actual_pct is not None:
-#                         target.actual_pct = actual_pct
-#                         total_actual += actual_pct
-                        
-#                         if abs(actual_pct - target.target_pct) < 1:
-#                             target.status = "Matched"
-#                             matched += 1
-#                         elif actual_pct >= target.target_pct:
+#                         # NEW LOGIC: If tracker % > target %, activity is fully completed (100%)
+#                         if actual_pct > target.target_pct:
+#                             target.actual_pct = 100.0
 #                             target.status = "Achieved"
 #                             matched += 1
+#                             logger.info(f"  {month}: {target.activity_text[:40]} | Target={target.target_pct:.0f}%, Tracker={actual_pct:.0f}% → COMPLETED 100%")
 #                         else:
-#                             target.status = "Not Matched"
+#                             target.actual_pct = actual_pct
+                            
+#                             if abs(actual_pct - target.target_pct) < 1:
+#                                 target.status = "Matched"
+#                                 matched += 1
+#                             elif actual_pct >= target.target_pct:
+#                                 target.status = "Achieved"
+#                                 matched += 1
+#                             else:
+#                                 target.status = "Not Matched"
+                            
+#                             logger.info(f"  {month}: {target.activity_text[:40]} | Target={target.target_pct:.0f}%, Actual={target.actual_pct:.0f}%, Status={target.status}")
+                        
+#                         total_actual += target.actual_pct
 #                     else:
 #                         target.status = "Not Found"
-                    
-#                     logger.info(f"  {month}: {target.activity_text[:40]} | Target={target.target_pct:.0f}%, Actual={target.actual_pct:.0f}%, Status={target.status}")
+#                         logger.info(f"  {month}: {target.activity_text[:40]} | Target={target.target_pct:.0f}%, Actual=Not Found")
                 
 #                 avg_actual = total_actual / len(month_targets) if month_targets else 0
                 
@@ -771,26 +674,67 @@
                 
 #                 row_data[f"% Complete- {month}"] = f"{avg_actual:.0f}%"
 #                 row_data[f"Status- {month}"] = status
+                
+#                 # Weightage and Weighted % for this month
+#                 weightage = 100  # Always 100 for all towers
+#                 weighted_pct = (avg_actual / weightage) * 100 if weightage > 0 else 0
+#                 row_data[f"Weightage- {month}"] = weightage
+#                 row_data[f"Weighted %- {month}"] = f"{weighted_pct:.0f}%"
 #             else:
 #                 # Tracker not available - leave data columns blank
 #                 logger.info(f"  {month}: Tracker not available - data columns left blank")
 #                 row_data[f"% Complete- {month}"] = ""
 #                 row_data[f"Status- {month}"] = ""
-            
-#             # Responsible and Delay columns always blank (manual entry)
-#             row_data[f"Responsible- {month}"] = ""
-#             row_data[f"Delay- {month}"] = ""
+#                 row_data[f"Weightage- {month}"] = ""
+#                 row_data[f"Weighted %- {month}"] = ""
         
-#         # Add summary columns
+#         # Add summary columns at the end
 #         last_month = months[-1]
 #         last_targets = [t for t in tower_targets[tower_name] if t.month == last_month]
 #         row_data[f"Target till {last_month}"] = "\n".join([t.activity_text for t in last_targets])
         
-#         weightage = 100 if not tower_name.startswith('NTA') else 50
-#         row_data['Weightage'] = weightage
-#         row_data['Weighted %'] = "0%"  # Placeholder
+#         # Add single Responsible and Delay columns at the end (manual entry)
+#         row_data['Responsible'] = ""
+#         row_data['Delay Reason'] = ""
         
 #         report_rows.append(row_data)
+    
+#     # Add summary row with averages at the end
+#     summary_row = {'Tower': 'AVERAGE WEIGHTED %'}
+    
+#     for month in months:
+#         # Calculate average of Weighted % for this month across all towers
+#         weighted_values = []
+        
+#         for row in report_rows:
+#             weighted_val = row.get(f"Weighted %- {month}", "")
+#             if weighted_val and weighted_val != "":
+#                 try:
+#                     # Remove % sign and convert to float
+#                     val = float(str(weighted_val).replace('%', ''))
+#                     weighted_values.append(val)
+#                 except (ValueError, TypeError):
+#                     pass
+        
+#         # Calculate average
+#         if weighted_values:
+#             avg_weighted = sum(weighted_values) / len(weighted_values)
+#             summary_row[f"Weighted %- {month}"] = f"{avg_weighted:.1f}%"
+#         else:
+#             summary_row[f"Weighted %- {month}"] = ""
+        
+#         # Leave other columns blank for summary row
+#         summary_row[f"Activity- {month} {year}"] = ""
+#         summary_row[f"% Complete- {month}"] = ""
+#         summary_row[f"Status- {month}"] = ""
+#         summary_row[f"Weightage- {month}"] = ""
+    
+#     # Add empty values for end columns
+#     summary_row[f"Target till {months[-1]}"] = ""
+#     summary_row['Responsible'] = ""
+#     summary_row['Delay Reason'] = ""
+    
+#     report_rows.append(summary_row)
     
 #     return pd.DataFrame(report_rows)
 
@@ -798,6 +742,8 @@
 #     """Apply formatting to report."""
 #     header_fill = PatternFill(start_color="366092", end_color="366092", fill_type="solid")
 #     header_font = Font(bold=True, color="FFFFFF")
+#     summary_fill = PatternFill(start_color="FFC000", end_color="FFC000", fill_type="solid")
+#     summary_font = Font(bold=True, size=11)
     
 #     # Format title
 #     worksheet.cell(1, 1).font = Font(bold=True, size=14)
@@ -816,11 +762,22 @@
 #         top=Side(style='thin'), bottom=Side(style='thin')
 #     )
     
+#     # Last row is the summary row
+#     summary_row_idx = worksheet.max_row
+    
 #     for row in range(5, worksheet.max_row + 1):
+#         is_summary_row = (row == summary_row_idx)
+        
 #         for col in range(1, worksheet.max_column + 1):
 #             cell = worksheet.cell(row, col)
 #             cell.alignment = Alignment(horizontal='left', vertical='top', wrap_text=True)
 #             cell.border = thin_border
+            
+#             # Special formatting for summary row
+#             if is_summary_row:
+#                 cell.fill = summary_fill
+#                 cell.font = summary_font
+#                 cell.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
     
 #     # Column widths
 #     for col_idx, column in enumerate(dataframe.columns, start=1):
@@ -831,6 +788,7 @@
 #             worksheet.column_dimensions[col_letter].width = 15
     
 #     worksheet.row_dimensions[4].height = 50
+#     worksheet.row_dimensions[summary_row_idx].height = 30  # Make summary row slightly taller
 
 # # ======================= MAIN =======================
 
@@ -839,6 +797,7 @@
 #     try:
 #         logger.info("\n" + "="*70)
 #         logger.info("MILESTONE REPORT GENERATOR v2.0 - FIXED")
+#         logger.info("SPECIAL: NTA-05 October hardcoded to 80%")
 #         logger.info("="*70)
         
 #         # Step 1: Find KRA
@@ -967,11 +926,8 @@
 
 
 
-"""
-Automated Milestone Report Generator - FIXED VERSION
-Hardcoded column numbers for stability, improved activity parsing
-MODIFIED: NTA-05 October activity hardcoded to 80%
-"""
+
+
 
 import os
 import logging
@@ -1227,121 +1183,185 @@ class ActivityTarget:
 
 def parse_kra_targets(worksheet) -> Dict[str, List[ActivityTarget]]:
     """
-    Parse ALL targets from KRA sheet for all towers.
-    Returns: Dict[tower_name, List[ActivityTarget]]
+    Parse ALL targets from KRA sheet for all towers and milestone types.
+    SPECIAL: Always creates "NTA Finishing Work Milestone" entry even if it has no targets
     """
     logger.info("\n" + "="*70)
-    logger.info("PARSING KRA TARGETS")
+    logger.info("PARSING KRA TARGETS (All Milestone Types)")
     logger.info("="*70)
     
     tower_targets = {}
     current_tower = None
+    current_section = None
+    nta_finishing_found = False  # Track if we found the NTA Finishing section
     
     # Start from row 5 (after header row 4)
     for row_idx in range(5, worksheet.max_row + 1):
         tower_cell = worksheet.cell(row_idx, KRA_TOWER_COL).value
         
-        # Check if this is a new tower row
+        # Check if this is a section header or tower row
         if tower_cell and str(tower_cell).strip():
             tower_name = str(tower_cell).strip()
             
-            # Only process actual towers (not finishing milestones)
-            if 'Tower' in tower_name or 'NTA' in tower_name:
-                if 'Finishing' not in tower_name:
-                    current_tower = tower_name
-                    if current_tower not in tower_targets:
-                        tower_targets[current_tower] = []
-                    
-                    logger.info(f"\nProcessing: {current_tower}")
-                    
-                    # Parse September target
-                    sep_activity = worksheet.cell(row_idx, KRA_SEP_ACTIVITY_COL).value
-                    sep_target = worksheet.cell(row_idx, KRA_SEP_TARGET_COL).value
-                    
-                    if sep_target and isinstance(sep_target, (int, float)) and sep_target > 0:
-                        activity_text = str(sep_activity).strip() if sep_activity else "Activity"
-                        target = ActivityTarget(current_tower, activity_text, float(sep_target) * 100, "September")
-                        tower_targets[current_tower].append(target)
-                        logger.info(f"  September: {activity_text} → {sep_target*100}%")
-                    
-                    # Parse October target
-                    oct_activity = worksheet.cell(row_idx, KRA_OCT_ACTIVITY_COL).value
-                    oct_target = worksheet.cell(row_idx, KRA_OCT_TARGET_COL).value
-                    
-                    if oct_target and isinstance(oct_target, (int, float)) and oct_target > 0:
-                        activity_text = str(oct_activity).strip() if oct_activity else "Activity"
-                        target = ActivityTarget(current_tower, activity_text, float(oct_target) * 100, "October")
-                        tower_targets[current_tower].append(target)
-                        logger.info(f"  October: {activity_text} → {oct_target*100}%")
-                    
-                    # Parse November target
-                    nov_activity = worksheet.cell(row_idx, KRA_NOV_ACTIVITY_COL).value
-                    nov_target = worksheet.cell(row_idx, KRA_NOV_TARGET_COL).value
-                    
-                    if nov_target and isinstance(nov_target, (int, float)) and nov_target > 0:
-                        activity_text = str(nov_activity).strip() if nov_activity else "Activity"
-                        target = ActivityTarget(current_tower, activity_text, float(nov_target) * 100, "November")
-                        tower_targets[current_tower].append(target)
-                        logger.info(f"  November: {activity_text} → {nov_target*100}%")
+            # ============= SECTION 1: Tower X Finishing Work Milestone =============
+            if 'Finishing Work Milestone' in tower_name and 'Tower' in tower_name and 'NTA' not in tower_name:
+                current_tower = tower_name
+                current_section = "TOWER_FINISHING"
+                
+                if current_tower not in tower_targets:
+                    tower_targets[current_tower] = []
+                
+                logger.info(f"\nProcessing: {current_tower} (Tower Finishing Work)")
+                
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "September", 
+                                    KRA_SEP_ACTIVITY_COL, KRA_SEP_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "October", 
+                                    KRA_OCT_ACTIVITY_COL, KRA_OCT_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "November", 
+                                    KRA_NOV_ACTIVITY_COL, KRA_NOV_TARGET_COL)
+            
+            # ============= SECTION 2: NTA Finishing Work Milestone (Header) =============
+            elif "NTA" in tower_name and "Finishing Work Milestone" in tower_name:
+                current_section = "NTA_FINISHING"
+                current_tower = "NTA Finishing Work Milestone"
+                nta_finishing_found = True  # Mark that we found this section
+                
+                # ALWAYS create this entry, even if no targets
+                if current_tower not in tower_targets:
+                    tower_targets[current_tower] = []
+                
+                logger.info(f"\nProcessing: {current_tower} (Section Header) - ALWAYS INCLUDED")
+                
+                # Parse targets for the header row (even if empty)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "September", 
+                                    KRA_SEP_ACTIVITY_COL, KRA_SEP_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "October", 
+                                    KRA_OCT_ACTIVITY_COL, KRA_OCT_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "November", 
+                                    KRA_NOV_ACTIVITY_COL, KRA_NOV_TARGET_COL)
+            
+            # ============= SECTION 3: Individual NTA rows under NTA Finishing =============
+            elif current_section == "NTA_FINISHING" and re.match(r'NTA\s*\d+', tower_name):
+                # Individual NTA under finishing section
+                nta_match = re.match(r'(NTA\s*\d+)', tower_name)
+                if nta_match:
+                    base_nta = nta_match.group(1).strip()
+                    base_nta = re.sub(r'NTA\s*(\d+)', r'NTA \1', base_nta)
+                    current_tower = f"{base_nta} Finishing Work"
                 else:
-                    current_tower = None  # Stop processing finishing milestones
+                    current_tower = f"{tower_name} Finishing Work"
+                
+                if current_tower not in tower_targets:
+                    tower_targets[current_tower] = []
+                
+                logger.info(f"\nProcessing: {current_tower} (Individual NTA Finishing)")
+                
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "September", 
+                                    KRA_SEP_ACTIVITY_COL, KRA_SEP_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "October", 
+                                    KRA_OCT_ACTIVITY_COL, KRA_OCT_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "November", 
+                                    KRA_NOV_ACTIVITY_COL, KRA_NOV_TARGET_COL)
+            
+            # ============= SECTION 4: External Development Work Milestone =============
+            elif 'External Development Work Milestone' in tower_name:
+                current_tower = "External Development Work"
+                current_section = "EXTERNAL"
+                
+                if current_tower not in tower_targets:
+                    tower_targets[current_tower] = []
+                
+                logger.info(f"\nProcessing: {current_tower}")
+                
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "September", 
+                                    KRA_SEP_ACTIVITY_COL, KRA_SEP_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "October", 
+                                    KRA_OCT_ACTIVITY_COL, KRA_OCT_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "November", 
+                                    KRA_NOV_ACTIVITY_COL, KRA_NOV_TARGET_COL)
+            
+            # ============= SECTION 5: Regular Towers and NTAs =============
+            elif ('Tower' in tower_name or 'NTA' in tower_name) and 'Finishing' not in tower_name:
+                current_tower = tower_name
+                current_section = "REGULAR"
+                
+                if current_tower not in tower_targets:
+                    tower_targets[current_tower] = []
+                
+                logger.info(f"\nProcessing: {current_tower} (Regular)")
+                
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "September", 
+                                    KRA_SEP_ACTIVITY_COL, KRA_SEP_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "October", 
+                                    KRA_OCT_ACTIVITY_COL, KRA_OCT_TARGET_COL)
+                _parse_month_targets(worksheet, row_idx, current_tower, tower_targets, "November", 
+                                    KRA_NOV_ACTIVITY_COL, KRA_NOV_TARGET_COL)
+            
+            else:
+                current_tower = None
+                current_section = None
         
-        # Check sub-rows for multi-line activities (Tower 5, Tower 7 pattern)
         elif current_tower:
-            # Check September sub-activity
-            sep_activity = worksheet.cell(row_idx, KRA_SEP_ACTIVITY_COL).value
-            sep_target = worksheet.cell(row_idx, KRA_SEP_TARGET_COL).value
-            
-            if sep_target and isinstance(sep_target, (int, float)) and sep_target > 0:
-                # Build hierarchical activity text
-                activity_parts = []
-                for back_row in range(max(row_idx - 3, 5), row_idx + 1):
-                    cell_val = worksheet.cell(back_row, KRA_SEP_ACTIVITY_COL).value
-                    if cell_val and str(cell_val).strip() and str(cell_val).strip() != current_tower:
-                        activity_parts.append(str(cell_val).strip())
-                
-                activity_text = "\n".join(activity_parts) if activity_parts else str(sep_activity).strip()
-                target = ActivityTarget(current_tower, activity_text, float(sep_target) * 100, "September")
-                tower_targets[current_tower].append(target)
-                logger.info(f"  September (sub): {activity_text[:50]}... → {sep_target*100}%")
-            
-            # Check October sub-activity
-            oct_activity = worksheet.cell(row_idx, KRA_OCT_ACTIVITY_COL).value
-            oct_target = worksheet.cell(row_idx, KRA_OCT_TARGET_COL).value
-            
-            if oct_target and isinstance(oct_target, (int, float)) and oct_target > 0:
-                activity_parts = []
-                for back_row in range(max(row_idx - 3, 5), row_idx + 1):
-                    cell_val = worksheet.cell(back_row, KRA_OCT_ACTIVITY_COL).value
-                    if cell_val and str(cell_val).strip() and str(cell_val).strip() != current_tower:
-                        activity_parts.append(str(cell_val).strip())
-                
-                activity_text = "\n".join(activity_parts) if activity_parts else str(oct_activity).strip()
-                target = ActivityTarget(current_tower, activity_text, float(oct_target) * 100, "October")
-                tower_targets[current_tower].append(target)
-                logger.info(f"  October (sub): {activity_text[:50]}... → {oct_target*100}%")
-            
-            # Check November sub-activity
-            nov_activity = worksheet.cell(row_idx, KRA_NOV_ACTIVITY_COL).value
-            nov_target = worksheet.cell(row_idx, KRA_NOV_TARGET_COL).value
-            
-            if nov_target and isinstance(nov_target, (int, float)) and nov_target > 0:
-                activity_parts = []
-                for back_row in range(max(row_idx - 3, 5), row_idx + 1):
-                    cell_val = worksheet.cell(back_row, KRA_NOV_ACTIVITY_COL).value
-                    if cell_val and str(cell_val).strip() and str(cell_val).strip() != current_tower:
-                        activity_parts.append(str(cell_val).strip())
-                
-                activity_text = "\n".join(activity_parts) if activity_parts else str(nov_activity).strip()
-                target = ActivityTarget(current_tower, activity_text, float(nov_target) * 100, "November")
-                tower_targets[current_tower].append(target)
-                logger.info(f"  November (sub): {activity_text[:50]}... → {nov_target*100}%")
+            _parse_sub_activity(worksheet, row_idx, current_tower, tower_targets, "September",
+                              KRA_SEP_ACTIVITY_COL, KRA_SEP_TARGET_COL)
+            _parse_sub_activity(worksheet, row_idx, current_tower, tower_targets, "October",
+                              KRA_OCT_ACTIVITY_COL, KRA_OCT_TARGET_COL)
+            _parse_sub_activity(worksheet, row_idx, current_tower, tower_targets, "November",
+                              KRA_NOV_ACTIVITY_COL, KRA_NOV_TARGET_COL)
     
-    logger.info(f"\nTotal towers with targets: {len(tower_targets)}")
-    for tower, targets in tower_targets.items():
+    # CRITICAL: Ensure "NTA Finishing Work Milestone" exists even if not found in sheet
+    if not nta_finishing_found:
+        logger.warning("NTA Finishing Work Milestone not found in KRA - creating empty entry")
+        tower_targets["NTA Finishing Work Milestone"] = []
+    
+    logger.info(f"\nTotal towers/sections: {len(tower_targets)}")
+    for tower, targets in sorted(tower_targets.items(), key=lambda x: sort_towers(x[0])):
         logger.info(f"  {tower}: {len(targets)} targets")
+        if targets:
+            for t in targets[:2]:  # Show first 2 targets
+                logger.info(f"    - {t.month}: {t.activity_text[:50]}...")
     
     return tower_targets
+
+def _parse_month_targets(worksheet, row_idx: int, tower_name: str, tower_targets: Dict, 
+                         month: str, activity_col: int, target_col: int):
+    """Helper function to parse targets for a specific month."""
+    activity = worksheet.cell(row_idx, activity_col).value
+    target = worksheet.cell(row_idx, target_col).value
+    
+    if target and isinstance(target, (int, float)) and target > 0:
+        activity_text = str(activity).strip() if activity else "Activity"
+        target_obj = ActivityTarget(tower_name, activity_text, float(target) * 100, month)
+        tower_targets[tower_name].append(target_obj)
+        logger.info(f"  {month}: {activity_text} → {target*100}%")
+
+
+def _parse_sub_activity(worksheet, row_idx: int, tower_name: str, tower_targets: Dict,
+                       month: str, activity_col: int, target_col: int):
+    """Helper function to parse sub-activities (multi-line activities)."""
+    activity = worksheet.cell(row_idx, activity_col).value
+    target = worksheet.cell(row_idx, target_col).value
+    
+    if target and isinstance(target, (int, float)) and target > 0:
+        # Build hierarchical activity text
+        activity_parts = []
+        current_activity = str(activity).strip() if activity else ""
+        
+        for back_row in range(max(row_idx - 3, 5), row_idx + 1):
+            cell_val = worksheet.cell(back_row, activity_col).value
+            if cell_val and str(cell_val).strip():
+                cell_str = str(cell_val).strip()
+                # Don't include section headers in activity text
+                if cell_str not in [tower_name, "NTA Finishing Work Milestone", "External Development Work Milestone"]:
+                    # Skip if this is a duplicate of the current row's activity (avoid double-counting)
+                    if back_row < row_idx and cell_str == current_activity:
+                        continue
+                    activity_parts.append(cell_str)
+        
+        activity_text = "\n".join(activity_parts) if activity_parts else current_activity
+        target_obj = ActivityTarget(tower_name, activity_text, float(target) * 100, month)
+        tower_targets[tower_name].append(target_obj)
+        logger.info(f"  {month} (sub): {activity_text[:50]}... → {target*100}%")
 
 # ======================= TRACKER DATA EXTRACTION =======================
 
@@ -1357,42 +1377,98 @@ def normalize_text(text: str) -> str:
 def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, month: str = None) -> Optional[float]:
     """
     Find matching activity in tracker and return % complete.
-    Uses Column G (TRACKER_PCT_COMPLETE_COL = 7) for % Complete.
+    Enhanced to handle all milestone types:
+    1. Regular towers/NTAs
+    2. Tower Finishing Work
+    3. NTA Finishing Work Milestone (header) - no tracker lookup
+    4. Individual NTA Finishing Work (NTA 01, NTA 02, etc.)
+    5. External Development Work - no tracker lookup
     
-    SPECIAL OVERRIDE: NTA-05 October "Lower Basement, Column/Shear Wall, Checking & Casting Work" = 80%
-    
-    HIERARCHICAL MATCHING: Find parent level first, then search for child within next 10 rows.
     """
-    # ============= HARDCODED OVERRIDE FOR NTA-05 OCTOBER =============
-    tower_normalized = tower_name.replace(" ", "").upper()
-    is_nta05 = tower_normalized in ["NTA05", "NTA5", "NTA-05", "NTA-5"]
-    is_october = month == "October"
     
-    if is_nta05 and is_october:
-        activity_normalized = normalize_text(activity_text)
-        # Check if this is the specific activity
-        has_lower_basement = "lower" in activity_normalized and "basement" in activity_normalized
-        has_column_shear = ("column" in activity_normalized or "shear" in activity_normalized)
-        has_checking_casting = ("checking" in activity_normalized and "casting" in activity_normalized) or "checking casting" in activity_normalized
-        
-        if has_lower_basement and has_column_shear and has_checking_casting:
-            logger.info(f"    ✓✓✓ HARDCODED OVERRIDE: NTA-05 October activity = 80% ✓✓✓")
-            return 80.0
-    # ================================================================
+    # Special handling for sections without tracker sheets
+    if tower_name in ["NTA Finishing Work Milestone", "External Development Work"]:
+        logger.debug(f"    {tower_name} - section header, no individual tracker sheet")
+        return None
+    
+    # Extract base tower name for sheet matching
+    base_tower = tower_name
+    
+    # Handle different milestone types
+    if "Finishing Work" in tower_name:
+        # "Tower 7 Finishing Work Milestone" -> "Tower 7"
+        # "NTA 01 Finishing Work" -> "NTA 01"
+        base_tower = tower_name.replace("Finishing Work Milestone", "").replace("Finishing Work", "").strip()
     
     # Find tower sheet
     tower_sheet = None
-    for sheet_name in tracker_wb.sheetnames:
-        if tower_name.replace("Tower ", "").replace("NTA ", "") in sheet_name:
-            tower_sheet = tracker_wb[sheet_name]
-            break
+    sheet_search_terms = []
+    
+    if "Tower" in base_tower:
+        # Extract number: "Tower 7" -> "7"
+        tower_num = base_tower.replace("Tower", "").strip()
+        # Be specific: only match sheets that have "Tower" in them
+        for sheet_name in tracker_wb.sheetnames:
+            if "tower" in sheet_name.lower() and tower_num in sheet_name:
+                tower_sheet = tracker_wb[sheet_name]
+                break
+    elif "NTA" in base_tower:
+        # NTAs should look in "Non Tower Area" sheet
+        for sheet_name in tracker_wb.sheetnames:
+            if "non tower" in sheet_name.lower() or "nta" in sheet_name.lower():
+                tower_sheet = tracker_wb[sheet_name]
+                break
+    else:
+        logger.debug(f"    Cannot extract tower identifier from: {tower_name}")
+        return None
     
     if not tower_sheet:
         logger.debug(f"    Sheet not found for {tower_name}")
         return None
     
-    # Split activity text into hierarchy levels
-    activity_lines = [line.strip() for line in activity_text.split('\n') if line.strip()]
+    # Define row ranges for each NTA tower to constrain search
+    NTA_ROW_RANGES = {
+        "NTA 01": (6, 33),
+        "NTA 02": (35, 62),
+        "NTA 03": (64, 91),
+        "NTA 04": (93, 120),
+        "NTA 05": (122, 149),
+        "NTA 06": (151, 178),
+        "NTA 07": (180, 207),
+        "NTA 08": (209, 236),
+        "NTA 09": (238, 266),
+        "NTA 10": (268, 296)
+    }
+    
+    # Determine row range based on tower
+    row_start = 3  # Default start row
+    row_end = tower_sheet.max_row + 1  # Default end row
+    
+    # Check if this is an NTA tower and apply row constraints
+    if "NTA" in base_tower:
+        # Normalize the NTA identifier (handle "NTA 01", "NTA 1", "NTA01", etc.)
+        nta_num = base_tower.replace("NTA", "").strip()
+        # Pad single digit with zero
+        if len(nta_num) == 1:
+            nta_num = "0" + nta_num
+        nta_key = f"NTA {nta_num}"
+        
+        if nta_key in NTA_ROW_RANGES:
+            row_start, row_end = NTA_ROW_RANGES[nta_key]
+            row_end += 1  # Make it inclusive
+            logger.debug(f"    Using NTA row range: {row_start}-{row_end-1}")
+    
+    # Split activity text into hierarchy levels - handle both newline and comma separation
+    activity_lines = []
+    if '\n' in activity_text:
+        # Newline-separated hierarchy (sub-activities)
+        activity_lines = [line.strip() for line in activity_text.split('\n') if line.strip()]
+    elif ',' in activity_text:
+        # Comma-separated hierarchy (single-line activities)
+        activity_lines = [line.strip() for line in activity_text.split(',') if line.strip()]
+    else:
+        # Single term
+        activity_lines = [activity_text.strip()] if activity_text.strip() else []
     
     if not activity_lines:
         return None
@@ -1400,10 +1476,8 @@ def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, mo
     logger.debug(f"    Searching in {tower_sheet.title}")
     logger.debug(f"    Hierarchy: {' → '.join(activity_lines)}")
     
-    # Strategy: Find the PARENT level first (e.g., "Upper Basement")
-    # Then find the CHILD within the next 10 rows (e.g., "Casting Work")
-    
-    parent_term = normalize_text(activity_lines[0])  # e.g., "upper basement"
+    # Strategy: Find the PARENT level first, then find the CHILD within the next 10 rows
+    parent_term = normalize_text(activity_lines[0])
     
     # Define conflicting terms for the parent
     conflicting_terms = []
@@ -1420,12 +1494,16 @@ def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, mo
     elif '3rd' in parent_term:
         conflicting_terms.extend(['ground', '1st', '2nd', '4th'])
     
+    # Special handling for finishing work keywords
+    if any(term in parent_term for term in ['finishing', 'paint', 'plastering', 'false ceiling', 'flooring', 'tiles', 'fixtures']):
+        conflicting_terms.extend(['structure', 'rcc', 'concrete', 'casting', 'shuttering', 'reinforcement'])
+    
     logger.debug(f"    Parent term: '{parent_term}'")
     logger.debug(f"    Conflicting terms: {conflicting_terms}")
     
-    # STEP 1: Find the parent row
+    # STEP 1: Find the parent row (within row range constraints)
     parent_row = None
-    for row_idx in range(3, tower_sheet.max_row + 1):
+    for row_idx in range(row_start, row_end):
         task_name = tower_sheet.cell(row_idx, TRACKER_TASK_NAME_COL).value
         
         if not task_name:
@@ -1449,17 +1527,15 @@ def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, mo
     
     # STEP 2: If we have child levels, search within next 10 rows
     if len(activity_lines) > 1:
-        # Get search terms from remaining levels
         child_terms = [normalize_text(line) for line in activity_lines[1:]]
-        
         logger.debug(f"    Child terms: {child_terms}")
         
         best_match = None
         best_match_score = 0
         best_match_row = None
         
-        # Search within next 10 rows after parent
-        for row_idx in range(parent_row + 1, min(parent_row + 11, tower_sheet.max_row + 1)):
+        # Search within next 10 rows after parent (but not beyond row_end)
+        for row_idx in range(parent_row + 1, min(parent_row + 11, row_end)):
             task_name = tower_sheet.cell(row_idx, TRACKER_TASK_NAME_COL).value
             
             if not task_name:
@@ -1467,18 +1543,28 @@ def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, mo
             
             task_normalized = normalize_text(task_name)
             
-            # Calculate match score: prioritize matching MORE terms (deeper hierarchy)
-            # Weight later terms more heavily (they're more specific, closer to leaf nodes)
+            # Calculate match score - prioritize matching deeper (later) terms
+            # Strongly prefer exact matches over partial matches
             match_count = 0
             for idx, term in enumerate(child_terms):
                 if term in task_normalized:
-                    # Weight: first child term = 1, second = 2, third = 3, etc.
-                    # This ensures "Casting Work" (term 2, weight 2) beats "Column/Shear Wall" (term 1, weight 1)
-                    match_count += (idx + 1)
+                    # Base score for matching this term (later terms get higher scores)
+                    term_score = (idx + 1)
+                    
+                    # Strong bonus for exact match (term equals the whole task name)
+                    if term == task_normalized:
+                        term_score += 100  # Very high bonus for exact match
+                    # Medium bonus if term is a major portion (>70%) of task name
+                    elif len(term) >= len(task_normalized) * 0.7:
+                        term_score += 20
+                    # Small penalty if task name has many extra words beyond our term
+                    elif len(task_normalized) > len(term) * 1.5:
+                        term_score -= 5  # Penalize if tracker has significantly more words
+                    
+                    match_count += term_score
             
-            # Only update if we have a BETTER match (higher score)
+            # Only update if we have a BETTER match
             if match_count > best_match_score:
-                # Get % Complete from Column G
                 pct_value = tower_sheet.cell(row_idx, TRACKER_PCT_COMPLETE_COL).value
                 
                 if pct_value is not None:
@@ -1525,39 +1611,59 @@ def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, mo
 # ======================= REPORT GENERATION =======================
 
 def sort_towers(tower_name: str) -> tuple:
-    """
-    Custom sort key for towers.
-    Returns tuple: (priority, numeric_value, original_name)
-    - Towers get priority 0
-    - NTAs get priority 1
-    This ensures Towers appear before NTAs, both sorted numerically
-    """
-    if tower_name.startswith('Tower'):
-        # Extract number from "Tower 4", "Tower 5", etc.
+    """Custom sort key ensuring proper order of all milestone types"""
+    tower_lower = tower_name.lower()
+    
+    # Priority 0: Regular Towers (Structure Work)
+    if tower_name.startswith('Tower') and 'finishing' not in tower_lower:
         match = re.search(r'Tower\s*(\d+)', tower_name)
         if match:
             return (0, int(match.group(1)), tower_name)
         return (0, 999, tower_name)
-    elif tower_name.startswith('NTA'):
-        # Extract number from "NTA 01", "NTA 02", etc.
+    
+    # Priority 1: Regular NTAs (Structure Work) - Must NOT be in finishing section
+    elif tower_name.startswith('NTA') and 'finishing' not in tower_lower and 'work' not in tower_lower:
+        # This catches only "NTA 01", "NTA 02" that are structure work
         match = re.search(r'NTA\s*(\d+)', tower_name)
         if match:
             return (1, int(match.group(1)), tower_name)
         return (1, 999, tower_name)
-    else:
-        # Any other format
+    
+    # Priority 2: Tower Finishing Work
+    elif 'tower' in tower_lower and 'finishing' in tower_lower:
+        match = re.search(r'Tower\s*(\d+)', tower_name, re.IGNORECASE)
+        if match:
+            return (2, int(match.group(1)), tower_name)
         return (2, 999, tower_name)
+    
+    # Priority 3: NTA Finishing Work Milestone Section
+    # Sub-priority 0: The header "NTA Finishing Work Milestone:"
+    # Sub-priority 1-99: Individual NTAs "NTA 01 Finishing Work", "NTA 02 Finishing Work"...
+    elif 'nta' in tower_lower and 'finishing' in tower_lower:
+        # The header comes first
+        if tower_name == "NTA Finishing Work Milestone":
+            return (3, 0, tower_name)
+        # Individual NTA Finishing Work entries
+        # Match pattern: "NTA 01 Finishing Work", "NTA 02 Finishing Work", etc.
+        match = re.search(r'NTA\s*(\d+)', tower_name, re.IGNORECASE)
+        if match:
+            nta_num = int(match.group(1))
+            return (3, nta_num, tower_name)
+        return (3, 999, tower_name)
+    
+    # Priority 4: External Development Work
+    elif 'external' in tower_lower or 'development' in tower_lower:
+        return (4, 0, tower_name)
+    
+    # Priority 5: Others
+    else:
+        return (5, 999, tower_name)
 
 def generate_report(tower_targets: Dict[str, List[ActivityTarget]], 
                    tracker_workbooks: Dict[str, Any], months: List[str], year: int) -> pd.DataFrame:
     """
     Generate milestone report DataFrame.
-    
-    Args:
-        tower_targets: All targets from KRA by tower
-        tracker_workbooks: Dict of available tracker workbooks {month: workbook}
-        months: List of quarter months
-        year: KRA year
+    SPECIAL: "NTA Finishing Work Milestone" appears as a section header row with no data
     """
     logger.info("\n" + "="*70)
     logger.info("GENERATING REPORT")
@@ -1565,15 +1671,40 @@ def generate_report(tower_targets: Dict[str, List[ActivityTarget]],
     
     report_rows = []
     
-    # Sort towers: Towers first (4, 5, 6, 7...), then NTAs (01, 02, 03...)
+    # Sort towers
     sorted_tower_names = sorted(tower_targets.keys(), key=sort_towers)
     
+    logger.info(f"\nSorted tower order:")
+    for idx, tower in enumerate(sorted_tower_names, 1):
+        logger.info(f"  {idx}. {tower} (Priority: {sort_towers(tower)})")
+    
     for tower_name in sorted_tower_names:
-        # Skip the standalone "NTA" row if it exists
+        # Skip only the invalid "NTA" entry
         if tower_name.strip().upper() == "NTA":
-            logger.info(f"\nSkipping: {tower_name} (not a valid tower)")
+            logger.info(f"\nSkipping: {tower_name} (invalid)")
             continue
+        
+        # SPECIAL CASE: "NTA Finishing Work Milestone" is a section header only
+        if tower_name == "NTA Finishing Work Milestone":
+            logger.info(f"\nAdding section header: {tower_name}")
             
+            # Create a header row with colon appended to tower name
+            header_row = {'Tower': f"{tower_name}:"}  # Add colon here
+            
+            for month in months:
+                header_row[f"Activity- {month} {year}"] = ""
+                header_row[f"% Complete- {month}"] = ""
+                header_row[f"Status- {month}"] = ""
+                header_row[f"Weightage- {month}"] = ""
+                header_row[f"Weighted %- {month}"] = ""
+            
+            header_row[f"Target till {months[-1]}"] = ""
+            header_row['Responsible'] = ""
+            header_row['Delay Reason'] = ""
+            
+            report_rows.append(header_row)
+            continue
+        
         logger.info(f"\nProcessing: {tower_name}")
         
         row_data = {'Tower': tower_name}
@@ -1581,12 +1712,10 @@ def generate_report(tower_targets: Dict[str, List[ActivityTarget]],
         # Process each month
         for month in months:
             month_targets = [t for t in tower_targets[tower_name] if t.month == month]
-            
-            # Check if tracker is available for this month
             tracker_wb = tracker_workbooks.get(month)
             
             if not month_targets:
-                # No targets for this month - leave completely blank
+                # No targets for this month
                 row_data[f"Activity- {month} {year}"] = ""
                 row_data[f"% Complete- {month}"] = ""
                 row_data[f"Status- {month}"] = ""
@@ -1594,47 +1723,32 @@ def generate_report(tower_targets: Dict[str, List[ActivityTarget]],
                 row_data[f"Weighted %- {month}"] = ""
                 continue
             
-            # We have targets - always show activity text
-            activities_text = []
-            for target in month_targets:
-                activities_text.append(target.activity_text)
+            # We have targets
+            activities_text = "\n".join([t.activity_text for t in month_targets])
+            row_data[f"Activity- {month} {year}"] = activities_text
             
-            row_data[f"Activity- {month} {year}"] = "\n".join(activities_text)
-            
-            # If tracker is available, populate data
             if tracker_wb:
                 total_actual = 0
                 matched = 0
                 
                 for target in month_targets:
-                    # Find in tracker - PASS THE MONTH to enable hardcoded override
                     actual_pct = find_activity_in_tracker(tracker_wb, tower_name, target.activity_text, month)
                     
                     if actual_pct is not None:
-                        # NEW LOGIC: If tracker % > target %, activity is fully completed (100%)
-                        if actual_pct > target.target_pct:
+                        # If actual meets or exceeds target, show 100%
+                        if actual_pct >= target.target_pct:
                             target.actual_pct = 100.0
                             target.status = "Achieved"
                             matched += 1
-                            logger.info(f"  {month}: {target.activity_text[:40]} | Target={target.target_pct:.0f}%, Tracker={actual_pct:.0f}% → COMPLETED 100%")
                         else:
+                            # Below target - show actual percentage
                             target.actual_pct = actual_pct
-                            
-                            if abs(actual_pct - target.target_pct) < 1:
-                                target.status = "Matched"
-                                matched += 1
-                            elif actual_pct >= target.target_pct:
-                                target.status = "Achieved"
-                                matched += 1
-                            else:
-                                target.status = "Not Matched"
-                            
-                            logger.info(f"  {month}: {target.activity_text[:40]} | Target={target.target_pct:.0f}%, Actual={target.actual_pct:.0f}%, Status={target.status}")
+                            target.status = "Not Matched"
                         
+                        logger.info(f"  {month}: {target.activity_text[:40]} = {target.actual_pct:.0f}%")
                         total_actual += target.actual_pct
                     else:
                         target.status = "Not Found"
-                        logger.info(f"  {month}: {target.activity_text[:40]} | Target={target.target_pct:.0f}%, Actual=Not Found")
                 
                 avg_actual = total_actual / len(month_targets) if month_targets else 0
                 
@@ -1648,61 +1762,56 @@ def generate_report(tower_targets: Dict[str, List[ActivityTarget]],
                 row_data[f"% Complete- {month}"] = f"{avg_actual:.0f}%"
                 row_data[f"Status- {month}"] = status
                 
-                # Weightage and Weighted % for this month
-                weightage = 100  # Always 100 for all towers
-                weighted_pct = (avg_actual / weightage) * 100 if weightage > 0 else 0
+                # Weightage is 100 for each month
+                weightage = 100
+                weighted_pct = (avg_actual / 100) * weightage
                 row_data[f"Weightage- {month}"] = weightage
-                row_data[f"Weighted %- {month}"] = f"{weighted_pct:.0f}%"
+                row_data[f"Weighted %- {month}"] = f"{weighted_pct:.1f}%"
             else:
-                # Tracker not available - leave data columns blank
-                logger.info(f"  {month}: Tracker not available - data columns left blank")
                 row_data[f"% Complete- {month}"] = ""
                 row_data[f"Status- {month}"] = ""
                 row_data[f"Weightage- {month}"] = ""
                 row_data[f"Weighted %- {month}"] = ""
         
-        # Add summary columns at the end
+        # Summary columns
         last_month = months[-1]
         last_targets = [t for t in tower_targets[tower_name] if t.month == last_month]
         row_data[f"Target till {last_month}"] = "\n".join([t.activity_text for t in last_targets])
         
-        # Add single Responsible and Delay columns at the end (manual entry)
         row_data['Responsible'] = ""
         row_data['Delay Reason'] = ""
         
         report_rows.append(row_data)
     
-    # Add summary row with averages at the end
+    # Add summary row
     summary_row = {'Tower': 'AVERAGE WEIGHTED %'}
     
     for month in months:
-        # Calculate average of Weighted % for this month across all towers
         weighted_values = []
-        
         for row in report_rows:
+            # Skip the NTA Finishing Work Milestone header row in calculations
+            if row['Tower'] == "NTA Finishing Work Milestone:" or row['Tower'] == "NTA Finishing Work Milestone":
+                continue
+                
             weighted_val = row.get(f"Weighted %- {month}", "")
             if weighted_val and weighted_val != "":
                 try:
-                    # Remove % sign and convert to float
                     val = float(str(weighted_val).replace('%', ''))
                     weighted_values.append(val)
                 except (ValueError, TypeError):
                     pass
         
-        # Calculate average
         if weighted_values:
             avg_weighted = sum(weighted_values) / len(weighted_values)
             summary_row[f"Weighted %- {month}"] = f"{avg_weighted:.1f}%"
         else:
             summary_row[f"Weighted %- {month}"] = ""
         
-        # Leave other columns blank for summary row
         summary_row[f"Activity- {month} {year}"] = ""
         summary_row[f"% Complete- {month}"] = ""
         summary_row[f"Status- {month}"] = ""
         summary_row[f"Weightage- {month}"] = ""
     
-    # Add empty values for end columns
     summary_row[f"Target till {months[-1]}"] = ""
     summary_row['Responsible'] = ""
     summary_row['Delay Reason'] = ""
@@ -1769,8 +1878,7 @@ def main():
     """Main execution."""
     try:
         logger.info("\n" + "="*70)
-        logger.info("MILESTONE REPORT GENERATOR v2.0 - FIXED")
-        logger.info("SPECIAL: NTA-05 October hardcoded to 80%")
+        logger.info("MILESTONE REPORT GENERATOR v2.0")
         logger.info("="*70)
         
         # Step 1: Find KRA

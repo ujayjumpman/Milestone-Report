@@ -557,7 +557,7 @@ def find_generated_file(project_config, project_name):
             current_time = time.time()
             
             # Check if file was created recently (within last 10 minutes)
-            if (current_time - file_time) < 1200:  # 20 minutes
+            if (current_time - file_time) < 1800:  # 20 minutes
                 st.write(f"✅ Found recent file: {latest_file}")
                 return latest_file
             else:
@@ -570,7 +570,7 @@ def find_generated_file(project_config, project_name):
         file_time = os.path.getctime(latest_new_file)
         current_time = time.time()
         
-        if (current_time - file_time) < 1200:  # 20 minutes
+        if (current_time - file_time) < 1800:  # 20 minutes
             st.write(f"📄 Found recent Excel file: {latest_new_file}")
             return latest_new_file
     
@@ -625,9 +625,9 @@ def run_project_script(project_name):
         
         # Enhanced timeout settings
         timeout_settings = {
-            'Veridia': 1200,      # 15 minutes for Veridia
-            'Eligo': 1200,        # 20 minutes for Eligo  
-            'EWS-LIG': 1200,      # 20 minutes
+            'Veridia': 1800,      # 15 minutes for Veridia
+            'Eligo': 1800,        # 20 minutes for Eligo  
+            'EWS-LIG': 1800,      # 20 minutes
             'WaveCityClub': 450, # 7.5 minutes
             'Eden': 450          # 7.5 minutes
         }

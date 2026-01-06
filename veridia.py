@@ -77,25 +77,6 @@ def download_file(cos, key):
 # ============================================================================
 # UTILITY FUNCTIONS
 # ============================================================================
-def extract_unit_from_cell(cell_value):
-    """Extract unit from cell value (e.g., 'Flats', 'activity', 'Slab')"""
-    if not cell_value:
-        return 'Flat'
-    
-    cell_str = str(cell_value).strip()
-    
-    # Check for common unit patterns
-    if 'activity' in cell_str.lower():
-        return 'activity'
-    elif 'slab' in cell_str.lower():
-        return 'Slab'
-    elif 'flat' in cell_str.lower():
-        return 'Flat'
-    
-    # Default to Flat
-    return 'Flat'
-
-
 def extract_date_from_filename(filename):
     """Extract date from filename (DD-MM-YYYY)"""
     pattern = r'\((\d{2}-\d{2}-\d{4})\)'
@@ -159,12 +140,13 @@ def is_cell_green(cell, green_hex=GREEN_HEX):
 # KRA PARSER
 # ============================================================================
 class DynamicKRAParser:
-    """Parse KRA sheet dynamically with unit detection"""
+    """Parse KRA sheet dynamically"""
     
     @staticmethod
     def find_section_headers(sheet):
         """Find section headers"""
         sections = {}
+        nta_found = False
         
         for row_idx in range(1, sheet.max_row + 1):
             cell = sheet.cell(row=row_idx, column=1)
@@ -173,7 +155,15 @@ class DynamicKRAParser:
             
             cell_value = str(cell.value).strip()
             
-            if re.search(r'(Tower|Green|Structure|External Development|External Dev)', cell_value, re.IGNORECASE):
+            if re.search(r'(Tower|Green|Structure|External Development|External Dev|NTA)', cell_value, re.IGNORECASE):
+                # Skip duplicate NTA sections
+                if 'NTA' in cell_value.upper() and nta_found:
+                    logger.info(f"Skipping duplicate NTA section: '{cell_value}'")
+                    continue
+                
+                if 'NTA' in cell_value.upper():
+                    nta_found = True
+                
                 sections[cell_value] = row_idx
                 logger.info(f"Found section: '{cell_value}'")
         
@@ -196,8 +186,8 @@ class DynamicKRAParser:
         return {}, None
     
     @staticmethod
-    def extract_activities(sheet, header_row, month_cols, report_months, is_structure=False, is_external=False):
-        """Extract activities with their units"""
+    def extract_activities(sheet, header_row, month_cols, report_months, is_structure=False, is_external=False, is_nta=False):
+        """Extract activities"""
         activities = []
         
         if is_structure:
@@ -206,6 +196,29 @@ class DynamicKRAParser:
                 if cell.value and str(cell.value).strip().lower() == 'total':
                     activities.append({'name': 'Slab Casting', 'row': row_idx, 'unit': 'Slab'})
                     break
+        elif is_nta:
+            for row_idx in range(header_row + 1, min(header_row + 50, sheet.max_row + 1)):
+                cell = sheet.cell(row=row_idx, column=1)
+                if not cell.value:
+                    continue
+                
+                activity_name = str(cell.value).strip()
+                
+                if activity_name.lower().startswith('total'):
+                    break
+                
+                if not activity_name:
+                    continue
+                
+                has_data = False
+                for col_idx in month_cols.values():
+                    val = sheet.cell(row=row_idx, column=col_idx).value
+                    if val and extract_number(val) > 0:
+                        has_data = True
+                        break
+                
+                if has_data:
+                    activities.append({'name': activity_name, 'row': row_idx, 'unit': 'Flat'})
         elif is_external:
             for row_idx in range(header_row + 1, min(header_row + 50, sheet.max_row + 1)):
                 cell = sheet.cell(row=row_idx, column=1)
@@ -228,17 +241,7 @@ class DynamicKRAParser:
                         break
                 
                 if has_data:
-                    unit = 'Flat'  # default
-                    
-                    # Check cells in this row for unit information
-                    for col_idx in month_cols.values():
-                        cell_val = sheet.cell(row=row_idx, column=col_idx).value
-                        detected_unit = extract_unit_from_cell(cell_val)
-                        if detected_unit != 'Flat':  # If we find a non-default unit
-                            unit = detected_unit
-                            break
-                    
-                    activities.append({'name': activity_name, 'row': row_idx, 'unit': unit})
+                    activities.append({'name': activity_name, 'row': row_idx, 'unit': 'Flat'})
         else:
             for row_idx in range(header_row + 1, min(header_row + 50, sheet.max_row + 1)):
                 cell = sheet.cell(row=row_idx, column=1)
@@ -247,7 +250,7 @@ class DynamicKRAParser:
                 
                 activity_name = str(cell.value).strip()
                 
-                if re.search(r'(Tower|Green|Finishing|Structure|External Development)\s*\d*', activity_name, re.IGNORECASE):
+                if re.search(r'(Tower|Green|Finishing|Structure|External Development|NTA)\s*\d*', activity_name, re.IGNORECASE):
                     if activity_name.lower().startswith('tower') or 'external' in activity_name.lower():
                         break
                     continue
@@ -263,17 +266,7 @@ class DynamicKRAParser:
                         break
                 
                 if has_data:
-                    unit = 'Flat'  # default
-                    
-                    # Check cells in this row for unit information
-                    for col_idx in month_cols.values():
-                        cell_val = sheet.cell(row=row_idx, column=col_idx).value
-                        detected_unit = extract_unit_from_cell(cell_val)
-                        if detected_unit != 'Flat':  # If we find a non-default unit
-                            unit = detected_unit
-                            break
-                    
-                    activities.append({'name': activity_name, 'row': row_idx, 'unit': unit})
+                    activities.append({'name': activity_name, 'row': row_idx, 'unit': 'Flat'})
         
         return activities
     
@@ -300,21 +293,27 @@ class DynamicKRAParser:
             
             is_structure = 'Structure' in section_name or 'Slab' in section_name
             is_external = 'External Development' in section_name
+            is_nta = 'NTA' in section_name
             
-            activities = cls.extract_activities(sheet, month_row, month_cols, report_months, is_structure, is_external)
+            activities = cls.extract_activities(sheet, month_row, month_cols, report_months, is_structure, is_external, is_nta)
             
             if not activities:
                 logger.warning(f"No activities found for {section_name}")
-                activities = []
+                # Create empty activity placeholder to show empty row
+                activities = [{'name': '', 'row': month_row + 1, 'unit': 'Flat'}]
             
             logger.info(f"Found {len(activities)} activities")
-            
-            for activity in activities:
-                logger.info(f"  - {activity['name']}: unit={activity['unit']}")
             
             targets = {}
             for activity in activities:
                 targets[activity['name']] = {}
+                
+                # Skip reading targets for empty activities
+                if not activity['name']:
+                    for month in report_months:
+                        targets[activity['name']][month] = 0
+                    continue
+                
                 row_idx = activity['row']
                 
                 for month, col_idx in month_cols.items():
@@ -331,7 +330,8 @@ class DynamicKRAParser:
                 'month_cols': month_cols,
                 'targets': targets,
                 'is_structure': is_structure,
-                'is_external': is_external
+                'is_external': is_external,
+                'is_nta': is_nta
             }
         
         return parsed
@@ -340,7 +340,7 @@ class DynamicKRAParser:
 # TRACKER PARSERS
 # ============================================================================
 class TowerTrackerParser:
-    """Parse tower tracker files"""
+    """Parse tower tracker files - finishing work"""
     
     @staticmethod
     def find_headers(ws):
@@ -542,156 +542,240 @@ class ExternalDevelopmentParser:
 
 
 class StructureWorkParser:
-    """Parse structure work tracker for green dates"""
-    
-    TARGET_SHEET = "Revised baseline with 60d NGT"
-    
+    """Parse Structure Work Tracker (Eligo format) to count green slab casting dates."""
+
     TOWER_COLUMNS = {
-        'Tower 6': ['FM', 'FQ', 'FU', 'FY', 'GC', 'GG', 'GK'],
-        'Tower 7': ['E1', 'EM', 'EQ', 'EU', 'EY', 'FC', 'FG'],
-        'T5': ['DE', 'DI', 'DM', 'DQ', 'DU', 'DY']
+        'Tower H': ['AB', 'AF', 'AJ', 'AN','AR','AV','AZ'],
+        'Tower G': ['N', 'R', 'V'],
+        'Tower F': ['D', 'H']
     }
-    
+
+    FLOOR_LABELS = ['1F', '2F', '3F', '4F', '5F', '6F', '7F', '8F']
+
     @staticmethod
     def extract_tower_from_section(section_name):
-        """Extract tower from section name"""
-        match = re.search(r'Tower\s+(\d+)', section_name, re.IGNORECASE)
-        if match:
-            return f"Tower {match.group(1)}"
-        if 'T5' in section_name.upper():
-            return 'T5'
-        return None
-    
+        """Extract tower name (e.g., 'Tower H') from section name."""
+        match = re.search(r'Tower\s+([A-Z])', str(section_name), re.IGNORECASE)
+        return f"Tower {match.group(1).upper()}" if match else None
+
     @staticmethod
     def col_letter_to_index(col_letter):
-        """Convert column letter to index"""
+        """Convert Excel column letter to numeric index."""
         result = 0
         for char in col_letter.upper():
             result = result * 26 + (ord(char) - ord('A') + 1)
         return result
-    
+
     @staticmethod
-    def find_target_sheet(wb, target_sheet_name):
-        """Find target sheet"""
-        if target_sheet_name in wb.sheetnames:
-            return wb[target_sheet_name]
+    def find_target_sheet(wb):
+        """Find the Eligo slab cycle sheet."""
+        target_names = [
+            "Revised Baselines- 25 days SC",
+            "ELIGO SLAB CYCLE"
+        ]
         
-        for sheet_name in wb.sheetnames:
-            if sheet_name.lower() == target_sheet_name.lower():
-                return wb[sheet_name]
+        for target in target_names:
+            if target in wb.sheetnames:
+                logger.info(f"Found sheet: {target}")
+                return wb[target]
         
-        keywords = target_sheet_name.lower().split()
-        for sheet_name in wb.sheetnames:
-            if all(kw in sheet_name.lower() for kw in keywords):
-                return wb[sheet_name]
+        for name in wb.sheetnames:
+            name_lower = name.lower()
+            if ('revised' in name_lower and 'baseline' in name_lower) or \
+               ('eligo' in name_lower and 'slab' in name_lower) or \
+               ('slab' in name_lower and 'cycle' in name_lower):
+                logger.info(f"Found sheet (partial match): {name}")
+                return wb[name]
         
+        logger.warning(f"Sheet not found. Available: {wb.sheetnames}")
         return None
-    
+
     @staticmethod
-    def is_valid_floor(floor_str):
-        """Check if valid floor"""
-        if not floor_str:
-            return False
-        floor_str = str(floor_str).strip()
-        return floor_str.endswith('F') or floor_str.endswith('f')
-    
+    def find_floor_rows(ws):
+        """Find rows containing floor data (1F, 2F, etc.)."""
+        floor_rows = {}
+        
+        for row_idx in range(1, min(50, ws.max_row + 1)):
+            for col_idx in range(1, 5):
+                cell_value = ws.cell(row=row_idx, column=col_idx).value
+                if cell_value:
+                    cell_str = str(cell_value).strip().upper()
+                    if cell_str in ['1F', '2F', '3F', '4F', '5F', '6F', '7F', '8F']:
+                        floor_rows[cell_str] = row_idx
+                        logger.debug(f"Found floor {cell_str} at row {row_idx}")
+        
+        return floor_rows
+
     @staticmethod
-    def parse_date(cell_value):
-        """Parse date"""
-        if not cell_value:
+    def parse_date(value):
+        """Parse date from cell value."""
+        if not value:
             return None
-        if isinstance(cell_value, datetime):
-            return cell_value
-        
-        cell_str = str(cell_value).strip()
-        if not cell_str or '###' in cell_str or cell_str == '-':
+        if isinstance(value, datetime):
+            return value
+
+        s = str(value).strip()
+        if not s or s in ('-', '###', ''):
             return None
-        
-        date_formats = ["%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y", "%Y/%m/%d"]
-        
-        for fmt in date_formats:
+
+        for fmt in ("%d-%m-%Y", "%d/%m/%Y", "%Y-%m-%d", "%m/%d/%Y", "%d.%m.%Y", "%d-%b-%Y"):
             try:
-                return datetime.strptime(cell_str, fmt)
-            except (ValueError, TypeError):
+                return datetime.strptime(s, fmt)
+            except ValueError:
                 continue
-        
         return None
-    
+
     @classmethod
-    def parse_green_dates(cls, tracker_bytes, section_name, target_month_num=None, tracker_year=None):
-        """Extract green dates for tower - prioritizing current tracker year"""
-        logger.info(f"=== PARSING STRUCTURE - GREEN DATES ===")
-        
+    def parse_green_dates(cls, tracker_bytes, section_name, target_month_num=None):
+        """Extract green anticipated dates (slab castings) for a given tower."""
+        logger.info("=== PARSING STRUCTURE - SLAB CASTING (ELIGO - GREEN ANTICIPATED DATES) ===")
+
         target_tower = cls.extract_tower_from_section(section_name)
         if not target_tower:
-            logger.warning(f"Could not extract tower")
+            logger.warning(f"Could not extract tower from section name: {section_name}")
             return []
-        
-        logger.info(f"Tower: {target_tower}")
-        
+
         tower_cols = cls.TOWER_COLUMNS.get(target_tower)
         if not tower_cols:
             logger.warning(f"No column mapping found for {target_tower}")
             return []
-        
-        wb = load_workbook(filename=tracker_bytes, data_only=False)
-        green_dates_list = []
-        
-        ws = cls.find_target_sheet(wb, cls.TARGET_SHEET)
-        if not ws:
-            logger.warning(f"Sheet '{cls.TARGET_SHEET}' not found")
-            return []
-        
-        logger.info(f"Using sheet: {ws.title}")
-        
-        col_indices = [cls.col_letter_to_index(col) for col in tower_cols]
-        floor_sections = [
-            {'name': 'South', 'rows': list(range(4, 11))},
-            {'name': 'North', 'rows': list(range(13, 21))}
-        ]
-        
-        green_cells_found = 0
-        
-        for section in floor_sections:
-            logger.info(f"Processing section: {section['name']}")
-            
-            for row_idx in section['rows']:
-                first_cell = ws.cell(row=row_idx, column=1).value
-                
-                if not first_cell:
-                    continue
-                
-                floor_str = str(first_cell).strip()
-                
-                if not cls.is_valid_floor(floor_str):
-                    continue
-                
-                for i, col_idx in enumerate(col_indices):
-                    cell = ws.cell(row=row_idx, column=col_idx)
-                    
-                    if is_cell_green(cell) and cell.value:
-                        green_cells_found += 1
-                        
-                        parsed_date = cls.parse_date(cell.value)
-                        
-                        if parsed_date:
-                            date_str = parsed_date.strftime('%d-%m-%Y')
-                            month = parsed_date.month
-                            year = parsed_date.year
-                            logger.info(f"{floor_str}: {date_str} (month {month})")
-                            
-                            if target_month_num is None or month == target_month_num:
-                                if tracker_year is None or year == tracker_year:
-                                    green_dates_list.append(parsed_date)
-        
-        logger.info(f"Found {green_cells_found} green cells | Extracted {len(green_dates_list)} dates")
-        return green_dates_list
 
+        logger.info(f"Tower: {target_tower} | Target month: {target_month_num}")
+        logger.info(f"Scanning Anticipated columns: {tower_cols}")
+
+        try:
+            wb = load_workbook(filename=tracker_bytes, data_only=False)
+        except Exception as e:
+            logger.error(f"Failed to load workbook: {e}")
+            return []
+
+        ws = cls.find_target_sheet(wb)
+        if not ws:
+            logger.warning(f"No Eligo Slab Cycle sheet found")
+            return []
+
+        logger.info(f"Using sheet: {ws.title}")
+
+        floor_rows = cls.find_floor_rows(ws)
+        if not floor_rows:
+            logger.warning("Could not find floor rows, using default range")
+            floor_rows = {f"{i}F": (i+3) for i in range(1, 9)}
+
+        logger.info(f"Found {len(floor_rows)} floor rows: {list(floor_rows.keys())}")
+
+        green_dates = []
+        green_cells_found = 0
+        total_cells_checked = 0
+
+        col_indices = [cls.col_letter_to_index(col) for col in tower_cols]
+
+        for floor_label in sorted(floor_rows.keys()):
+            row_idx = floor_rows[floor_label]
+            
+            for col_letter, col_idx in zip(tower_cols, col_indices):
+                total_cells_checked += 1
+                cell = ws.cell(row=row_idx, column=col_idx)
+                
+                if not cell.value:
+                    continue
+                
+                if is_cell_green(cell):
+                    green_cells_found += 1
+                    parsed_date = cls.parse_date(cell.value)
+                    
+                    if parsed_date:
+                        if target_month_num is None or parsed_date.month == target_month_num:
+                            green_dates.append(parsed_date)
+                            logger.info(f"✓ Green date found: {parsed_date.strftime('%d-%b-%Y')} "
+                                       f"(Floor {floor_label}, Col {col_letter})")
+                    else:
+                        logger.warning(f"Could not parse date from {col_letter}{row_idx}: '{cell.value}'")
+                else:
+                    cell_color = get_cell_hex_color(cell)
+                    logger.debug(f"Cell {col_letter}{row_idx}: Not green (color: {cell_color}, value: {cell.value})")
+
+        logger.info(f"Checked {total_cells_checked} cells | Found {green_cells_found} green cells")
+
+        if not green_dates:
+            logger.warning(f"No green anticipated dates found for {target_tower}")
+            return []
+
+        latest_year = max(d.year for d in green_dates)
+        filtered_dates = [d for d in green_dates if d.year == latest_year]
+
+        logger.info(f"Total green dates: {len(green_dates)} | "
+                   f"Filtered to {latest_year}: {len(filtered_dates)} dates")
+
+        return sorted(filtered_dates)
+
+        
 # ============================================================================
 # REPORT GENERATOR
 # ============================================================================
-class VerdiaReportGenerator:
-    """Generate quarterly report"""
+class EligoReportGenerator:
+    
+    
+    def _forward_fill_percentages(self, activity_name, counts, months):
+        """
+        Forward fill percentage values across months.
+        If an activity has a percentage value in a later month, copy it to all earlier months.
+        This applies to completion-based activities like C-Gypsum, Lift Installation, etc.
+        """
+        months_list = list(months)
+        filled_counts = dict(counts[activity_name])
+        
+        # Find the first non-zero percentage value (scanning from right/last month)
+        target_value = None
+        target_month_idx = None
+        
+        for idx in range(len(months_list) - 1, -1, -1):
+            month = months_list[idx]
+            month_val = filled_counts.get(month, 0)
+            try:
+                pct = float(str(month_val).strip('%')) if isinstance(month_val, str) else float(month_val)
+            except (ValueError, AttributeError):
+                pct = 0.0
+            
+            if pct > 0:
+                target_value = pct
+                target_month_idx = idx
+                break
+        
+        # If found a non-zero value, copy it to all earlier months
+        if target_value is not None and target_month_idx is not None:
+            for idx in range(target_month_idx):
+                filled_counts[months_list[idx]] = target_value
+        
+        return filled_counts
+
+    def _is_completion_activity(self, activity_name):
+        """
+        Check if activity is a completion-based milestone (reaches 100% and stays there).
+        Examples: Lift Installation, C-Gypsum and POP punning, Finishing, etc.
+        """
+        completion_keywords = [
+            'lift installation',
+            'c-gypsum',
+            'c-gypsum and pop',
+            'pop punning',
+            'final handover',
+            'completion',
+            'ready for possession',
+            'finishing'
+        ]
+        
+        activity_lower = activity_name.lower()
+        return any(keyword in activity_lower for keyword in completion_keywords)
+
+    def _is_common_area_section(self, section_name):
+        """Check if section is from Common Area sheet"""
+        section_lower = section_name.lower()
+        return 'common area' in section_lower or 'comman area' in section_lower or 'common' in section_lower
+    
+    
+    
+    """Generate quarterly report for ELIGO"""
+    
     def __init__(self):
         self.cos = init_cos()
         self.kra_key = None
@@ -704,7 +788,7 @@ class VerdiaReportGenerator:
         self.structure_green_dates = {}
     
     def get_latest_kra(self):
-        """Find latest KRA file"""
+        """Find latest KRA file using year and quarter comparison"""
         logger.info("=== FINDING LATEST KRA ===")
         
         all_files = list_files(self.cos, "")
@@ -714,25 +798,57 @@ class VerdiaReportGenerator:
             logger.error("No KRA files found")
             return False
         
-        latest_file = sorted(kra_files)[-1]
-        self.kra_key = latest_file
-        logger.info(f"Latest KRA: {os.path.basename(self.kra_key)}")
+        logger.info(f"Found {len(kra_files)} KRA files")
         
-        filename = os.path.basename(latest_file)
-        quarter, months, year = determine_quarter_from_kra(filename)
+        # Step 1: Extract quarter info from each KRA filename
+        kra_with_quarters = []
         
-        if quarter and months and year:
-            self.current_quarter = quarter
-            self.quarter_months = months
-            self.quarter_year = year
-            self.tracker_months = [MONTH_SHIFT_MAP.get(m, m) for m in self.quarter_months]
+        for file_path in kra_files:
+            filename = os.path.basename(file_path)
+            quarter, months, year = determine_quarter_from_kra(filename)
             
-            logger.info(f"Quarter: {self.current_quarter} {self.quarter_year}")
-            logger.info(f"Report Months: {self.quarter_months}")
-            logger.info(f"Tracker Months: {self.tracker_months}")
-            return True
+            if quarter and months and year:
+                # Convert quarter to numeric for sorting (Q1→1, Q2→2, Q3→3, Q4→4)
+                quarter_num = int(quarter[1])
+                
+                kra_with_quarters.append({
+                    'path': file_path,
+                    'filename': filename,
+                    'quarter': quarter,
+                    'months': months,
+                    'year': year,
+                    'sort_key': (year, quarter_num)
+                })
+                
+                logger.info(f"  ✓ {filename} → Q{quarter_num} {year}")
+            else:
+                logger.warning(f"  ✗ {filename} → Could not extract quarter info")
         
-        return False
+        # Step 2: Validate we have at least one valid KRA file
+        if not kra_with_quarters:
+            logger.error("No KRA files with valid quarter information found")
+            logger.error("Expected format: 'KRA Milestones for Month1 Month2 Month3 YYYY.xlsx'")
+            return False
+        
+        # Step 3: Sort by (Year, Quarter) and pick the latest
+        kra_with_quarters.sort(key=lambda x: x['sort_key'])
+        latest = kra_with_quarters[-1]
+        
+        # Step 4: Set instance variables from latest KRA
+        self.kra_key = latest['path']
+        self.current_quarter = latest['quarter']
+        self.quarter_months = latest['months']
+        self.quarter_year = latest['year']
+        self.tracker_months = [MONTH_SHIFT_MAP.get(m, m) for m in self.quarter_months]
+        
+        logger.info(f"\n{'='*80}")
+        logger.info(f"Latest KRA: {latest['filename']}")
+        logger.info(f"Quarter: {self.current_quarter} {self.quarter_year}")
+        logger.info(f"Report Months: {self.quarter_months}")
+        logger.info(f"Tracker Months: {self.tracker_months}")
+        logger.info(f"{'='*80}\n")
+        
+        return True
     
     def parse_kra(self):
         """Parse KRA file"""
@@ -743,13 +859,13 @@ class VerdiaReportGenerator:
         
         kra_sheet = None
         for sheet_name in wb.sheetnames:
-            if 'veridia' in sheet_name.lower() and 'target' in sheet_name.lower():
+            if 'eligo' in sheet_name.lower() and 'target' in sheet_name.lower():
                 kra_sheet = wb[sheet_name]
                 logger.info(f"Using sheet: {sheet_name}")
                 break
         
         if not kra_sheet:
-            logger.error("No Veridia sheet found")
+            logger.error("No ELIGO sheet found")
             return False
         
         parser = DynamicKRAParser()
@@ -763,82 +879,160 @@ class VerdiaReportGenerator:
         return True
     
     def find_trackers(self):
-        """Find tracker files with month shifting logic"""
+        """Find tracker files - match tracker month to report month"""
         logger.info("\n=== FINDING TRACKER FILES ===")
+        logger.info(f"Report Months: {self.quarter_months}")
+        logger.info(f"Tracker Months: {self.tracker_months}")
         
-        veridia_files = list_files(self.cos, "Veridia/")
+        eligo_files = list_files(self.cos, "Eligo/")
+        logger.info(f"Total files in Eligo/: {len(eligo_files)}\n")
         
         for section_name in self.kra_data.keys():
             self.tracker_keys[section_name] = {}
             
+            # Determine tracker pattern and type
+            is_external = False
+            is_nta = False
+            is_structure = False
+            tracker_pattern = None
+            
             if 'External Development' in section_name:
                 tracker_pattern = 'External Development'
-            elif 'Structure' in section_name or 'Slab' in section_name:
+                is_external = True
+            elif 'NTA' in section_name:
+                tracker_pattern = 'NTA.*Finishing'
+                is_nta = True
+            elif 'Structure' in section_name:
                 tracker_pattern = 'Structure Work Tracker'
+                is_structure = True
             else:
-                tower_match = re.search(r'(Tower \d+|Green \d+)', section_name, re.IGNORECASE)
+                tower_match = re.search(r'Tower\s+([A-Z])', section_name, re.IGNORECASE)
                 if not tower_match:
+                    logger.warning(f"Could not extract tower from: {section_name}")
                     continue
-                tracker_pattern = f'{tower_match.group(1)}.*Tracker'
+                tracker_pattern = f'Tower {tower_match.group(1).upper()}.*Finishing'
             
-            logger.info(f"\nLooking for: {tracker_pattern}")
+            logger.info(f"{'='*80}")
+            logger.info(f"Section: {section_name}")
+            logger.info(f"Pattern: {tracker_pattern}")
+            logger.info(f"Type: {'TOWER' if not (is_external or is_nta or is_structure) else 'EXTERNAL' if is_external else 'NTA' if is_nta else 'STRUCTURE'}")
+            logger.info(f"{'='*80}")
             
-            for idx, report_month in enumerate(self.quarter_months):
-                tracker_month = self.tracker_months[idx]
-                tracker_month_num = MONTH_TO_NUM.get(tracker_month)
-                
-                tracker_year = self.quarter_year
-                if self.current_quarter == 'Q3' and tracker_month in ['January', 'February']:
-                    tracker_year = self.quarter_year + 1
-                elif self.current_quarter == 'Q4' and tracker_month == 'June':
-                    tracker_year = self.quarter_year + 1
-                
-                found = False
-                for file_path in veridia_files:
-                    filename = os.path.basename(file_path)
+            # ===== TOWER SECTIONS: Match by tracker month =====
+            if not (is_external or is_nta or is_structure):
+                for report_month, tracker_month in zip(self.quarter_months, self.tracker_months):
+                    tracker_month_num = MONTH_TO_NUM.get(tracker_month)
                     
-                    if re.search(tracker_pattern, filename, re.IGNORECASE):
-                        file_date = extract_date_from_filename(filename)
+                    # Calculate the year for this tracker month
+                    tracker_year = self.quarter_year
+                    if self.current_quarter == 'Q3' and tracker_month in ['January', 'February']:
+                        tracker_year = self.quarter_year + 1
+                    elif self.current_quarter == 'Q4' and tracker_month == 'June':
+                        tracker_year = self.quarter_year + 1
+                    
+                    logger.info(f"\n  Report: {report_month} → Tracker: {tracker_month} ({tracker_month_num}/{tracker_year})")
+                    
+                    found = False
+                    for file_path in eligo_files:
+                        filename = os.path.basename(file_path)
                         
-                        if file_date and file_date.month == tracker_month_num and file_date.year == tracker_year:
+                        # Check pattern match
+                        if not re.search(tracker_pattern, filename, re.IGNORECASE):
+                            continue
+                        
+                        # Extract date
+                        file_date = extract_date_from_filename(filename)
+                        if not file_date:
+                            logger.debug(f"    Could not extract date from: {filename}")
+                            continue
+                        
+                        # Check if month and year match
+                        if file_date.month == tracker_month_num and file_date.year == tracker_year:
                             self.tracker_keys[section_name][report_month] = file_path
-                            logger.info(f"{report_month} (tracker: {tracker_month}): {filename}")
+                            logger.info(f"    ✅ Found: {filename}")
                             found = True
                             break
-                
-                if not found:
-                    logger.warning(f"{report_month} (tracker: {tracker_month}): Not found")
+                    
+                    if not found:
+                        logger.warning(f"    ❌ Not found")
+            
+            # ===== EXTERNAL/NTA/STRUCTURE: Use OLD LOGIC (find any matching tracker) =====
+            else:
+                for report_month, tracker_month in zip(self.quarter_months, self.tracker_months):
+                    tracker_month_num = MONTH_TO_NUM.get(tracker_month)
+                    
+                    tracker_year = self.quarter_year
+                    if self.current_quarter == 'Q3' and tracker_month in ['January', 'February']:
+                        tracker_year = self.quarter_year + 1
+                    elif self.current_quarter == 'Q4' and tracker_month == 'June':
+                        tracker_year = self.quarter_year + 1
+                    
+                    logger.info(f"\n  Report: {report_month} → Tracker: {tracker_month} ({tracker_month_num}/{tracker_year})")
+                    
+                    found = False
+                    for file_path in eligo_files:
+                        filename = os.path.basename(file_path)
+                        
+                        if re.search(tracker_pattern, filename, re.IGNORECASE):
+                            file_date = extract_date_from_filename(filename)
+                            
+                            if file_date and file_date.month == tracker_month_num and file_date.year == tracker_year:
+                                self.tracker_keys[section_name][report_month] = file_path
+                                logger.info(f"    ✅ Found: {filename}")
+                                found = True
+                                break
+                    
+                    if not found:
+                        logger.warning(f"    ❌ Not found")
+        
+        logger.info(f"\n{'='*80}")
+        logger.info("FINAL TRACKER ASSIGNMENT")
+        logger.info(f"{'='*80}")
+        for section_name, months_dict in self.tracker_keys.items():
+            logger.info(f"\n{section_name}:")
+            for month in self.quarter_months:
+                if month in months_dict:
+                    logger.info(f"  {month}: ✅ {os.path.basename(months_dict[month])}")
+                else:
+                    logger.info(f"  {month}: ❌ (blank)")
     
-    def _parse_tracker(self, tracker_file, section_name, activities, is_structure, report_month=None):
+    def _parse_tracker(self, tracker_file, section_name, activities, is_structure, is_nta=False, report_month=None):
         """Parse tracker file and return (counts, data_type)"""
         try:
             raw = download_file(self.cos, tracker_file)
             
             if is_structure:
-                logger.info(f"Parser: STRUCTURE WORK")
+                logger.info(f"Parser: STRUCTURE WORK (SLAB CASTING)")
                 
                 report_month_num = MONTH_TO_NUM.get(report_month)
                 logger.info(f"Extracting green dates for: {report_month} (month {report_month_num})")
                 
-                file_date = extract_date_from_filename(tracker_file)
-                tracker_file_year = file_date.year if file_date else None
-                logger.info(f"Tracker file year: {tracker_file_year}")
-                
-                green_dates = StructureWorkParser.parse_green_dates(
-                    BytesIO(raw), 
-                    section_name, 
-                    report_month_num,
-                    tracker_year=tracker_file_year
-                )
+                green_dates = StructureWorkParser.parse_green_dates(BytesIO(raw), section_name, report_month_num)
                 
                 if not green_dates:
-                    logger.warning(f"No green dates found for {report_month} {tracker_file_year}")
-                else:
+                    logger.info(f"No dates found for month {report_month_num}, trying all green dates...")
+                    green_dates = StructureWorkParser.parse_green_dates(BytesIO(raw), section_name, None)
+                    if green_dates:
+                        logger.info(f"Found {len(green_dates)} green dates (all months, latest year)")
+                
+                if green_dates:
                     self.structure_green_dates[report_month] = green_dates
                     logger.info(f"Found {len(green_dates)} green dates for {report_month}")
+                else:
+                    logger.warning(f"No green dates found")
                 
                 tracker_counts = {'Slab Casting': len(green_dates)}
                 return tracker_counts, 'count'
+            
+            elif is_nta:
+                logger.info(f"Parser: NTA FINISHING")
+                month_num = MONTH_TO_NUM.get(report_month)
+                if not month_num:
+                    logger.warning(f"No valid month")
+                    return {act['name']: 0 for act in activities}, 'count'
+                
+                tracker_counts, data_type = TowerTrackerParser.parse(BytesIO(raw), activities, month_num)
+                return tracker_counts, data_type
                 
             elif 'External Development' in section_name:
                 logger.info(f"Parser: EXTERNAL DEVELOPMENT")
@@ -863,7 +1057,7 @@ class VerdiaReportGenerator:
                 return tracker_counts, 'percentage'
             
             else:
-                logger.info(f"Parser: TOWER")
+                logger.info(f"Parser: TOWER FINISHING")
                 month_num = MONTH_TO_NUM.get(report_month)
                 if not month_num:
                     logger.warning(f"No valid month")
@@ -891,221 +1085,228 @@ class VerdiaReportGenerator:
             targets = section_data['targets']
             is_structure = section_data.get('is_structure', False)
             is_external = section_data.get('is_external', False)
+            is_nta = section_data.get('is_nta', False)
             
-            counts = {act['name']: {month: None for month in self.quarter_months} for act in activities}
+            counts = {act['name']: {month: 0 for month in self.quarter_months} for act in activities}
             data_types = {act['name']: 'count' for act in activities}
             activity_tracker_months = {act['name']: None for act in activities}
-            months_with_tracker = {act['name']: [] for act in activities}
+            
+            # Track which months have trackers for each activity
+            months_with_trackers = {act['name']: set() for act in activities}
             
             if section_name in self.tracker_keys:
                 logger.info(f"Found trackers for {len(self.tracker_keys[section_name])} months")
                 for report_month, tracker_file in self.tracker_keys[section_name].items():
                     logger.info(f"Parsing {report_month}: {os.path.basename(tracker_file)}")
                     tracker_counts, data_type = self._parse_tracker(
-                        tracker_file, section_name, activities, is_structure, report_month
+                        tracker_file, section_name, activities, is_structure, is_nta, report_month
                     )
                     
                     for activity_name, count in tracker_counts.items():
                         if activity_name in counts:
                             counts[activity_name][report_month] = count
                             data_types[activity_name] = data_type
-                            months_with_tracker[activity_name].append(report_month)
+                            months_with_trackers[activity_name].add(report_month)
                             logger.info(f"{activity_name}: {count} (type: {data_type})")
                             
                             if count > 0 and activity_tracker_months[activity_name] is None:
                                 activity_tracker_months[activity_name] = report_month
                                 logger.info(f"  → Tracker month for {activity_name}: {report_month}")
             else:
-                logger.warning(f"No trackers found")
+                logger.warning(f"No trackers found for {section_name}")
             
-            df = self._build_dataframe(section_name, activities, targets, counts, data_types, 
-                                       activity_tracker_months, months_with_tracker)
+            df = self._build_dataframe(
+                section_name, activities, targets, counts, data_types, 
+                activity_tracker_months, months_with_trackers
+            )
             report_dfs[section_name] = df
         
         return report_dfs
     
-    
     def _build_dataframe(self, section_name, activities, targets, counts, data_types, 
-                        activity_tracker_months=None, months_with_tracker=None):
-        """Build milestone dataframe - show all KRA targets, only cumulate with trackers"""
+                activity_tracker_months=None, months_with_trackers=None, tracker_file_used=None):
+        """Build milestone dataframe with debug logging"""
         data = []
         total_acts = len(activities)
         weightage = round(100 / total_acts, 2) if total_acts else 0
-    
+        
         is_external = 'External Development' in section_name
-    
+        is_nta = 'NTA' in section_name
+        is_tower = not (is_external or is_nta or 'Structure' in section_name)
+        
+        logger.info(f"\n{'='*80}")
+        logger.info(f"BUILDING DATAFRAME: {section_name}")
+        logger.info(f"is_tower={is_tower}, is_nta={is_nta}, is_external={is_external}")
+        logger.info(f"{'='*80}")
+        
         if activity_tracker_months is None:
             activity_tracker_months = {}
-        if months_with_tracker is None:
-            months_with_tracker = {act['name']: [] for act in activities}
-    
-        delay_reasons_col_name = f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}"
-    
+        if months_with_trackers is None:
+            months_with_trackers = {act['name']: set() for act in activities}
+        if tracker_file_used is None:
+            tracker_file_used = {act['name']: {month: None for month in self.quarter_months} for act in activities}
+        
         for i, activity in enumerate(activities):
             name = activity['name']
             unit = activity.get('unit', 'Flat')
             unit_plural = f"{unit}s"
-    
-            # Initialize row with all columns set to empty strings
+            
+            logger.info(f"\n{'─'*80}")
+            logger.info(f"Activity {i+1}: {name}")
+            logger.info(f"Unit: {unit}")
+            logger.info(f"Targets: {targets.get(name, {})}")
+            logger.info(f"Counts: {counts.get(name, {})}")
+            logger.info(f"Months with trackers: {months_with_trackers.get(name, set())}")
+            logger.info(f"{'─'*80}")
+            
+            # Skip empty activities
+            if not name:
+                row = {
+                    "Milestone": "",
+                    "Activity": "",
+                    "Target": "",
+                    "Weightage": "",
+                    "Weighted Delay against Targets": "",
+                    f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}": "",
+                }
+                for m in self.quarter_months:
+                    row[f"% Work Done against Target-Till {m}"] = ""
+                    row[f"Target achieved in {m}"] = ""
+                row["Total achieved"] = ""
+                data.append(row)
+                continue
+            
+            is_completion = self._is_completion_activity(name)
+            if is_external and is_completion:
+                counts[name] = self._forward_fill_percentages(name, counts, self.quarter_months)
+            
             row = {
                 "Milestone": f"{i+1:02d}",
                 "Activity": name,
                 "Weightage": weightage,
                 "Weighted Delay against Targets": "",
-                delay_reasons_col_name: "",  # ALWAYS BLANK
+                f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}": "",
             }
-    
+            
             total_target = 0
             target_parts = []
             data_is_percentage = data_types.get(name, 'count') == 'percentage'
-            months_available = months_with_tracker.get(name, [])
-    
-            if is_external:
-                tracker_month = activity_tracker_months.get(name)
-    
-                if tracker_month:
-                    display_month = tracker_month
-                    display_target = int(targets[name].get(tracker_month, 0))
-                    if display_target == 0:
-                        display_target = 100
-                else:
-                    months_with_data = []
-                    for month in self.quarter_months:
-                        month_target = targets[name].get(month, 0)
-                        month_done = counts[name].get(month)
-    
-                        if month_target > 0 or (month_done is not None and month_done > 0):
-                            months_with_data.append(month)
-    
-                    if months_with_data:
-                        display_month = months_with_data[0]
-                        display_target = int(targets[name].get(display_month, 0))
-                        if display_target == 0:
-                            display_target = 100
-                    else:
-                        display_month = self.quarter_months[0]
-                        display_target = 100
-    
-                row["Target"] = f"{display_target}% by {display_month}"
-    
+            is_common_area = self._is_common_area_section(section_name)
+            
+            if is_external or is_common_area:
+                row["Target"] = "External/Common Area"
             else:
                 for month in self.quarter_months:
                     target = int(targets[name].get(month, 0))
                     total_target += target
                     if target > 0:
                         target_parts.append(f"{target}-{month}")
-    
                 row["Target"] = f"{total_target} {unit_plural} ({', '.join(target_parts)})" if target_parts else f"0 {unit_plural}"
-    
+            
             cum_done = 0
             cum_target = 0
             total_achieved = 0
-            last_pct = None
-            any_tracker_seen = False
-    
-            for month in self.quarter_months:
-                month_done = counts[name].get(month)
-                month_target = targets[name].get(month, 0)
-    
-                if is_external:
-                    tracker_exists = month in months_available
+            last_pct = 0.0
+            last_tracker_file = None
+            
+            logger.info(f"\nMonth-by-month calculation:")
+            
+            for month_idx, month in enumerate(self.quarter_months):
+                logger.info(f"\n  {month}:")
                 
-                    if not tracker_exists:
-                        row[f"% Work Done against Target-Till {month}"] = ""
-                        row[f"Target achieved in {month}"] = ""
-                        continue
-                
-                    any_tracker_seen = True
-                
-                    if data_is_percentage:
-                        pct = float(month_done or 0.0)
-                        pct = min(max(pct, 0.0), 100.0)
-                        target_pct = float(month_target) if month_target else 100.0
-                    else:
-                        if month_target and month_target > 0:
-                            pct = float(month_done) if month_done is not None else 0.0
-                        else:
-                            pct = float(month_done) if month_done is not None else 0.0
-                        target_pct = int(month_target) if month_target else 100
-                
-                    pct = round(pct, 2)
-                    target_pct = round(target_pct, 2)
-                
-                    achievement_against_target = min((pct / target_pct * 100), 100) if target_pct > 0 else 0
-                    achievement_against_target = round(achievement_against_target, 2)
-                
-                    row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
-                    row[f"Target achieved in {month}"] = f"{pct}% out of {target_pct}% target"
-                    total_achieved = pct
-                    last_pct = achievement_against_target
-    
+                if is_external or is_common_area:
+                    logger.info(f"    (External/Common Area - skipping tower logic)")
                 else:
-                    if month_done is not None:
-                        month_done = int(month_done)
-                        month_target = int(month_target)
-    
-                        cum_done += month_done
-                        cum_target += month_target
+                    month_done = counts[name].get(month, 0)
+                    month_target = int(targets[name].get(month, 0))
+                    has_tracker = month in months_with_trackers[name]
+                    
+                    logger.info(f"    Done: {month_done}, Target: {month_target}, Has Tracker: {has_tracker}")
+                    
+                    if has_tracker:
+                    # Reset cumulative if tracker changed (tower only)
+                        if is_tower:
+                            current_tracker = tracker_file_used[name].get(month)
+                            tracker_changed = (last_tracker_file is not None and 
+                                             current_tracker != last_tracker_file and 
+                                             current_tracker is not None)
+                            
+                            if tracker_changed:
+                                logger.info(f"    >>> TRACKER CHANGED - Resetting cumulative")
+                                cum_done = month_done
+                                cum_target = month_target
+                            else:
+                                cum_done += month_done
+                                cum_target += month_target
+                            
+                            if current_tracker is not None:
+                                last_tracker_file = current_tracker
+                        else:
+                            cum_done += month_done
+                            cum_target += month_target
+                        
                         total_achieved += month_done
-    
-                        pct = 0.0 if cum_target == 0 else (cum_done / cum_target) * 100
+                        
+                        logger.info(f"    Cumulative: {cum_done}/{cum_target}")
+                        
+                        # ===== NEW LOGIC: Calculate percentage =====
+                        if cum_done > 0 and cum_target == 0:
+                            # If we have done units but no target, show 100%
+                            pct = 100.0
+                            logger.info(f"    Logic: Done({cum_done}) > Target({cum_target}) → 100%")
+                        elif cum_target == 0:
+                            # If both are 0, show 0%
+                            pct = 0.0
+                            logger.info(f"    Logic: Done and Target both 0 → 0%")
+                        else:
+                            # Normal calculation
+                            pct = (cum_done / cum_target) * 100
+                            logger.info(f"    Logic: ({cum_done}/{cum_target}) * 100 = {pct}%")
+                        
                         pct = min(pct, 100.0)
                         pct = round(pct, 2)
-    
+                        
+                        logger.info(f"    Percentage: {pct}%")
+                        # ==========================================
+                        
                         row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
                         row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
                         last_pct = pct
+                        
                     else:
+                        logger.info(f"    NO TRACKER - leaving blank")
                         row[f"% Work Done against Target-Till {month}"] = ""
-                        month_target = int(month_target)
-                        row[f"Target achieved in {month}"] = f"0 out of {month_target} {unit_plural}"
-    
-            # Calculate Weighted Delay (only if tracker data exists)
-            if is_external:
-                if any_tracker_seen:
-                    row["Total achieved"] = f"{int(total_achieved) if total_achieved == int(total_achieved) else total_achieved}%"
-                    if last_pct is not None and last_pct != 0:
-                        row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
-                    else:
-                        row["Weighted Delay against Targets"] = ""
-                else:
-                    row["Total achieved"] = ""
-                    row["Weighted Delay against Targets"] = ""
+                        row[f"Target achieved in {month}"] = f"0 out of {int(month_target)} {unit_plural}"
+            
+            if is_external or is_common_area:
+                row["Total achieved"] = "N/A"
             else:
                 row["Total achieved"] = f"{int(total_achieved)} {unit_plural}"
-                if last_pct is not None:
-                    row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
-                else:
-                    row["Weighted Delay against Targets"] = ""
             
-            # CRITICAL: ALWAYS keep Delay Reasons blank
-            row[delay_reasons_col_name] = ""
-    
+            row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+            
+            logger.info(f"\nFinal row:")
+            logger.info(f"  Total achieved: {row['Total achieved']}")
+            logger.info(f"  Last pct: {last_pct}%")
+            logger.info(f"  Weighted delay: {row['Weighted Delay against Targets']}")
+            
             data.append(row)
-    
-        # Build column order carefully
-        cols = ["Milestone", "Activity", "Target"]
         
-        # Add % Work Done columns for each month
+        cols = ["Milestone", "Activity", "Target"]
         for m in self.quarter_months:
             cols.append(f"% Work Done against Target-Till {m}")
-        
-        # Add summary columns
-        cols.extend(["Weightage", "Weighted Delay against Targets", "Total achieved"])
-        
-        # Add Target achieved columns for each month
+        cols.extend(["Weightage", "Weighted Delay against Targets"])
         for m in self.quarter_months:
             cols.append(f"Target achieved in {m}")
+        cols.extend(["Total achieved", f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}"])
         
-        # Add Delay Reasons column at the END
-        cols.append(delay_reasons_col_name)
-    
         return pd.DataFrame(data, columns=cols)
         
     def _sort_sections(self, sections):
-        """Sort sections: Structure, Towers, External"""
+        """Sort sections: Structure, Towers, NTA, External"""
         structure_sections = {}
         tower_sections = {}
+        nta_sections = {}
         external_sections = {}
         
         for section_name in sections:
@@ -1113,6 +1314,8 @@ class VerdiaReportGenerator:
             
             if 'structure' in name_lower or 'slab' in name_lower:
                 structure_sections[section_name] = sections[section_name]
+            elif 'nta' in name_lower:
+                nta_sections[section_name] = sections[section_name]
             elif 'external development' in name_lower:
                 external_sections[section_name] = sections[section_name]
             else:
@@ -1122,6 +1325,8 @@ class VerdiaReportGenerator:
             tower_sections.keys(),
             key=lambda x: int(re.search(r'\d+', x).group()) if re.search(r'\d+', x) else x.lower()
         )
+        
+        sorted_nta = sorted(nta_sections.keys())
         
         sorted_external = sorted(
             external_sections.keys(),
@@ -1133,6 +1338,8 @@ class VerdiaReportGenerator:
             result[section] = structure_sections[section]
         for section in sorted_towers:
             result[section] = tower_sections[section]
+        for section in sorted_nta:
+            result[section] = nta_sections[section]
         for section in sorted_external:
             result[section] = external_sections[section]
         
@@ -1140,13 +1347,13 @@ class VerdiaReportGenerator:
     
     def write_report(self, report_dfs):
         """Write Excel report"""
-        filename = f"Veridia_Milestone_Report_{self.current_quarter}_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
+        filename = f"ELIGO_Milestone_Report_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
         
         wb = Workbook()
         ws = wb.active
         ws.title = "Time Delivery Milestones"
         
-        ws.append([f"Veridia Time Delivery Milestones Report - {self.current_quarter} ({', '.join(self.quarter_months)}) {self.quarter_year}"])
+        ws.append([f"ELIGO Time Delivery Milestones Report - {self.current_quarter} ({', '.join(self.quarter_months)}) {self.quarter_year}"])
         ws.append([f"Report Generated on: {datetime.now().strftime('%d-%m-%Y')}"])
         ws.append([])
         
@@ -1163,64 +1370,49 @@ class VerdiaReportGenerator:
         for section_name in sorted_report_dfs.keys():
             df = sorted_report_dfs[section_name]
             
+            # Determine number of columns for merge
+            num_cols = len(df.columns) if not df.empty else 8
+            
+            # Add section title
             ws.append([f"{section_name} Progress Against Milestones"])
             title_row = ws.max_row
-            
-            if not df.empty:
-                num_cols = len(df.columns)
-            else:
-                num_cols = 11
-            
             ws.merge_cells(f'A{title_row}:{get_column_letter(num_cols)}{title_row}')
             ws[f'A{title_row}'].font = bold
             ws[f'A{title_row}'].fill = grey
             ws[f'A{title_row}'].alignment = center
             
             if df.empty:
-                header_cols = ["Milestone", "Activity", "Target"]
-                for m in self.quarter_months:
-                    header_cols.append(f"% Work Done against Target-Till {m}")
-                header_cols.extend(["Weightage", "Weighted Delay against Targets"])
-                for m in self.quarter_months:
-                    header_cols.append(f"Target achieved in {m}")
-                header_cols.extend(["Total achieved", f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}"])
-                
-                ws.append(header_cols)
-                header_row = ws.max_row
-                
-                for col_idx in range(1, len(header_cols) + 1):
-                    ws.cell(header_row, col_idx).font = bold
-                    ws.cell(header_row, col_idx).fill = grey
-                    ws.cell(header_row, col_idx).border = border
-                    ws.cell(header_row, col_idx).alignment = center
-                
-                logger.warning(f"No activities found for {section_name}")
-            else:
-                for r in dataframe_to_rows(df, index=False, header=True):
-                    ws.append(r)
-                
-                header_row = title_row + 1
-                for col_idx in range(1, len(df.columns) + 1):
-                    ws.cell(header_row, col_idx).font = bold
-                    ws.cell(header_row, col_idx).fill = grey
-                    ws.cell(header_row, col_idx).border = border
-                
-                for row in ws.iter_rows(title_row + 2, ws.max_row):
-                    for col_idx, cell in enumerate(row, 1):
-                        cell.border = border
-                        cell.alignment = center if cell.column > 2 else left
-                
-                try:
-                    total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"] if v and str(v).strip() != "")
-                except:
-                    total_delay = 0
-                
-                ws.append(["Total Delay"])
-                total_row = ws.max_row
-                for cell in ws[total_row]:
-                    cell.font = bold
-                    cell.fill = yellow
+                continue
+            
+            # Add dataframe rows (includes header as first row)
+            for r in dataframe_to_rows(df, index=False, header=True):
+                ws.append(r)
+            
+            # Format header row
+            header_row = title_row + 1
+            for col_idx in range(1, len(df.columns) + 1):
+                ws.cell(header_row, col_idx).font = bold
+                ws.cell(header_row, col_idx).fill = grey
+                ws.cell(header_row, col_idx).border = border
+            
+            # Format data rows
+            for row in ws.iter_rows(header_row + 1, ws.max_row):
+                for col_idx, cell in enumerate(row, 1):
                     cell.border = border
+                    cell.alignment = center if col_idx > 2 else left
+            
+            # Add total delay row
+            try:
+                total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"])
+            except:
+                total_delay = 0
+            
+            ws.append(["Total Delay"])
+            total_row = ws.max_row
+            for cell in ws[total_row]:
+                cell.font = bold
+                cell.fill = yellow
+                cell.border = border
             
             ws.append([])
         
@@ -1242,7 +1434,7 @@ class VerdiaReportGenerator:
     def generate(self):
         """Generate complete report"""
         logger.info("="*80)
-        logger.info("=== VERIDIA QUARTERLY REPORT GENERATOR ===")
+        logger.info("=== ELIGO QUARTERLY REPORT GENERATOR ===")
         logger.info("="*80)
         
         if not self.get_latest_kra():
@@ -1273,9 +1465,10 @@ class VerdiaReportGenerator:
 # MAIN
 # ============================================================================
 def main():
-    generator = VerdiaReportGenerator()
+    generator = EligoReportGenerator()
     success = generator.generate()
     return 0 if success else 1
 
 if __name__ == "__main__":
     exit(main())
+    

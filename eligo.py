@@ -272,7 +272,7 @@ class DynamicKRAParser:
     
     @classmethod
     def parse_kra_dynamic(cls, sheet, report_months):
-        """Parse KRA sheet"""
+        """Parse KRA sheet with data type detection (count vs percentage)"""
         logger.info("=== PARSING KRA ===\n")
         
         sections = cls.find_section_headers(sheet)
@@ -281,6 +281,11 @@ class DynamicKRAParser:
             return {}
         
         parsed = {}
+        
+        # Keywords that indicate percentage-based activities
+        PERCENTAGE_KEYWORDS = [
+            'handover', 'lift', 'external','lift handover'
+        ]
         
         for section_name, start_row in sorted(sections.items(), key=lambda x: x[1]):
             logger.info(f"Parsing: {section_name}")
@@ -305,8 +310,11 @@ class DynamicKRAParser:
             logger.info(f"Found {len(activities)} activities")
             
             targets = {}
+            activity_data_types = {}  # NEW: Track data type per activity
+            
             for activity in activities:
                 targets[activity['name']] = {}
+                activity_data_types[activity['name']] = 'count'  # Default
                 
                 # Skip reading targets for empty activities
                 if not activity['name']:
@@ -315,20 +323,55 @@ class DynamicKRAParser:
                     continue
                 
                 row_idx = activity['row']
+                cell_has_percentage_symbol = False
                 
+                # ===== COLLECT VALUES AND CHECK FOR PERCENTAGE SYMBOL =====
                 for month, col_idx in month_cols.items():
                     cell_value = sheet.cell(row=row_idx, column=col_idx).value
+                    cell_str = str(cell_value).strip() if cell_value else ""
+                    
+                    # Check if cell contains % symbol BEFORE extracting number
+                    if '%' in cell_str:
+                        cell_has_percentage_symbol = True
+                    
                     val = extract_number(cell_value)
                     
                     if 0 <= val <= 1 and is_external:
                         val = val * 100
                     
                     targets[activity['name']][month] = val
+                
+                # ===== AUTO-DETECT DATA TYPE =====
+                detected_type = 'count'  # Default
+                detection_reason = ""
+                
+                # Rule 1: If cell has % symbol → PERCENTAGE
+                if cell_has_percentage_symbol:
+                    detected_type = 'percentage'
+                    detection_reason = "% symbol in cell"
+                
+                # Rule 2: Check activity name for percentage keywords → PERCENTAGE
+                elif any(kw in activity['name'].lower() for kw in PERCENTAGE_KEYWORDS):
+                    detected_type = 'percentage'
+                    detection_reason = "activity name keyword"
+                
+                # Rule 3: External or NTA section → PERCENTAGE
+                elif is_external or is_nta:
+                    detected_type = 'percentage'
+                    detection_reason = "external/NTA section type"
+                
+                else:
+                    detected_type = 'count'
+                    detection_reason = "default count type"
+                
+                activity_data_types[activity['name']] = detected_type
+                logger.info(f"  ✓ {activity['name']} → {detected_type.upper()} ({detection_reason})")
             
             parsed[section_name] = {
                 'activities': activities,
                 'month_cols': month_cols,
                 'targets': targets,
+                'data_types': activity_data_types,  # NEW: Add data types to output
                 'is_structure': is_structure,
                 'is_external': is_external,
                 'is_nta': is_nta
@@ -378,13 +421,42 @@ class TowerTrackerParser:
                     continue
         return None
     
+    @staticmethod
+    def extract_percentage(cell_value):
+        """Extract percentage from cell if it exists"""
+        if not cell_value:
+            return None
+        
+        cell_str = str(cell_value).strip()
+        
+        # Check if cell contains % symbol
+        if '%' not in cell_str:
+            return None
+        
+        # Remove % and extract number
+        cell_str = cell_str.replace("%", "").strip()
+        match = re.search(r"(\d+(?:\.\d+)?)", cell_str)
+        
+        if match:
+            try:
+                pct = float(match.group(1))
+                # If decimal format (0-1), convert to percentage
+                if 0 <= pct < 1:
+                    pct = pct * 100
+                return max(0, min(pct, 100))
+            except ValueError:
+                return None
+        
+        return None
+    
     @classmethod
     def parse(cls, tracker_bytes, activities, month_num):
-        """Parse tower tracker"""
+        """Parse tower tracker - returns both counts and percentages"""
         logger.info(f"=== PARSING TOWER TRACKER ===")
         wb = load_workbook(filename=tracker_bytes, data_only=True)
         
         tracker_counts = {act['name']: 0 for act in activities}
+        tracker_percentages = {act['name']: None for act in activities}
         found_counts = {act['name']: False for act in activities}
         
         for sheet_name in wb.sheetnames:
@@ -401,6 +473,7 @@ class TowerTrackerParser:
                     continue
                 
                 sheet_count = 0
+                sheet_percentage = None
                 
                 for row_idx in range(header_row + 1, ws.max_row + 1):
                     activity_cell = ws.cell(row=row_idx, column=activity_col).value
@@ -412,14 +485,27 @@ class TowerTrackerParser:
                     if activity_name.lower() not in str(activity_cell).strip().lower():
                         continue
                     
+                    # Check if finish_cell contains a percentage
+                    pct = cls.extract_percentage(finish_cell)
+                    if pct is not None:
+                        sheet_percentage = pct
+                        logger.info(f"{activity_name}: {pct}% (from tracker cell)")
+                        continue
+                    
+                    # Otherwise treat as date count
                     finish_date = cls.parse_date(finish_cell)
                     if finish_date and finish_date.month == month_num:
                         sheet_count += 1
                 
-                if sheet_count > 0:
+                if sheet_percentage is not None:
+                    tracker_percentages[activity_name] = sheet_percentage
+                    tracker_counts[activity_name] = sheet_percentage
+                    found_counts[activity_name] = True
+                    logger.info(f"{activity_name}: {sheet_percentage}% (percentage-based)")
+                elif sheet_count > 0:
                     tracker_counts[activity_name] = sheet_count
                     found_counts[activity_name] = True
-                    logger.info(f"{activity_name}: {sheet_count} completed")
+                    logger.info(f"{activity_name}: {sheet_count} completed (count-based)")
         
         logger.info(f"Tower tracker parsed")
         return tracker_counts, 'count'
@@ -924,10 +1010,9 @@ class EligoReportGenerator:
                     tracker_month_num = MONTH_TO_NUM.get(tracker_month)
                     
                     # Calculate the year for this tracker month
+                    # For Q3 2026: all tracker months (Jan, Feb, Mar) are in 2026
                     tracker_year = self.quarter_year
-                    if self.current_quarter == 'Q3' and tracker_month in ['January', 'February']:
-                        tracker_year = self.quarter_year + 1
-                    elif self.current_quarter == 'Q4' and tracker_month == 'June':
+                    if self.current_quarter == 'Q4' and tracker_month == 'June':
                         tracker_year = self.quarter_year + 1
                     
                     logger.info(f"\n  Report: {report_month} → Tracker: {tracker_month} ({tracker_month_num}/{tracker_year})")
@@ -961,10 +1046,10 @@ class EligoReportGenerator:
                 for report_month, tracker_month in zip(self.quarter_months, self.tracker_months):
                     tracker_month_num = MONTH_TO_NUM.get(tracker_month)
                     
+                    # Calculate the year for this tracker month
+                    # For Q3 2026: all tracker months (Jan, Feb, Mar) are in 2026
                     tracker_year = self.quarter_year
-                    if self.current_quarter == 'Q3' and tracker_month in ['January', 'February']:
-                        tracker_year = self.quarter_year + 1
-                    elif self.current_quarter == 'Q4' and tracker_month == 'June':
+                    if self.current_quarter == 'Q4' and tracker_month == 'June':
                         tracker_year = self.quarter_year + 1
                     
                     logger.info(f"\n  Report: {report_month} → Tracker: {tracker_month} ({tracker_month_num}/{tracker_year})")
@@ -984,17 +1069,17 @@ class EligoReportGenerator:
                     
                     if not found:
                         logger.warning(f"    ❌ Not found")
-        
-        logger.info(f"\n{'='*80}")
-        logger.info("FINAL TRACKER ASSIGNMENT")
-        logger.info(f"{'='*80}")
-        for section_name, months_dict in self.tracker_keys.items():
-            logger.info(f"\n{section_name}:")
-            for month in self.quarter_months:
-                if month in months_dict:
-                    logger.info(f"  {month}: ✅ {os.path.basename(months_dict[month])}")
-                else:
-                    logger.info(f"  {month}: ❌ (blank)")
+            
+            logger.info(f"\n{'='*80}")
+            logger.info("FINAL TRACKER ASSIGNMENT")
+            logger.info(f"{'='*80}")
+            for section_name, months_dict in self.tracker_keys.items():
+                logger.info(f"\n{section_name}:")
+                for month in self.quarter_months:
+                    if month in months_dict:
+                        logger.info(f"  {month}: ✅ {os.path.basename(months_dict[month])}")
+                    else:
+                        logger.info(f"  {month}: ❌ (blank)")
     
     def _parse_tracker(self, tracker_file, section_name, activities, is_structure, is_nta=False, report_month=None):
         """Parse tracker file and return (counts, data_type)"""
@@ -1083,13 +1168,19 @@ class EligoReportGenerator:
             
             activities = section_data['activities']
             targets = section_data['targets']
+            kra_data_types = section_data.get('data_types', {})  # NEW: Get KRA data types
             is_structure = section_data.get('is_structure', False)
             is_external = section_data.get('is_external', False)
             is_nta = section_data.get('is_nta', False)
             
             counts = {act['name']: {month: 0 for month in self.quarter_months} for act in activities}
-            data_types = {act['name']: 'count' for act in activities}
+            data_types = {}
             activity_tracker_months = {act['name']: None for act in activities}
+            
+            # ===== INITIALIZE DATA TYPES FROM KRA =====
+            for activity in activities:
+                act_name = activity['name']
+                data_types[act_name] = kra_data_types.get(act_name, 'count')
             
             # Track which months have trackers for each activity
             months_with_trackers = {act['name']: set() for act in activities}
@@ -1105,9 +1196,9 @@ class EligoReportGenerator:
                     for activity_name, count in tracker_counts.items():
                         if activity_name in counts:
                             counts[activity_name][report_month] = count
-                            data_types[activity_name] = data_type
+                            # Keep KRA data type (don't override with tracker type)
                             months_with_trackers[activity_name].add(report_month)
-                            logger.info(f"{activity_name}: {count} (type: {data_type})")
+                            logger.info(f"{activity_name}: {count} (KRA type: {data_types[activity_name]})")
                             
                             if count > 0 and activity_tracker_months[activity_name] is None:
                                 activity_tracker_months[activity_name] = report_month
@@ -1125,7 +1216,7 @@ class EligoReportGenerator:
     
     def _build_dataframe(self, section_name, activities, targets, counts, data_types, 
                 activity_tracker_months=None, months_with_trackers=None, tracker_file_used=None):
-        """Build milestone dataframe with debug logging"""
+        """Build milestone dataframe with debug logging - handles count and percentage data types"""
         data = []
         total_acts = len(activities)
         weightage = round(100 / total_acts, 2) if total_acts else 0
@@ -1151,11 +1242,15 @@ class EligoReportGenerator:
             unit = activity.get('unit', 'Flat')
             unit_plural = f"{unit}s"
             
+            # ===== GET DATA TYPE FOR THIS ACTIVITY =====
+            activity_data_type = data_types.get(name, 'count')
+            
             logger.info(f"\n{'─'*80}")
             logger.info(f"Activity {i+1}: {name}")
             logger.info(f"Unit: {unit}")
             logger.info(f"Targets: {targets.get(name, {})}")
             logger.info(f"Counts: {counts.get(name, {})}")
+            logger.info(f"Data Type: {activity_data_type}")
             logger.info(f"Months with trackers: {months_with_trackers.get(name, set())}")
             logger.info(f"{'─'*80}")
             
@@ -1190,11 +1285,35 @@ class EligoReportGenerator:
             
             total_target = 0
             target_parts = []
-            data_is_percentage = data_types.get(name, 'count') == 'percentage'
             is_common_area = self._is_common_area_section(section_name)
             
+            # ===== SET TARGET DISPLAY =====
             if is_external or is_common_area:
                 row["Target"] = "External/Common Area"
+            elif activity_data_type == 'percentage':
+                # For percentage activities, show values with month names
+                percentage_parts = []
+                for month in self.quarter_months:
+                    target_val = targets[name].get(month, 0)
+                    # Convert decimal to percentage if needed
+                    try:
+                        target_val = float(target_val)
+                        # Convert decimal (0-1) to percentage (0-100)
+                        if 0 <= target_val < 1:
+                            target_val = target_val * 100
+                        elif target_val == 1.0:
+                            target_val = 100.0
+                        
+                        # Format as integer if whole number, else keep 2 decimals
+                        if target_val == int(target_val):
+                            target_val = int(target_val)
+                        else:
+                            target_val = round(target_val, 2)
+                    except (ValueError, TypeError):
+                        target_val = 0
+                    
+                    percentage_parts.append(f"{target_val}% ({month})")
+                row["Target"] = ", ".join(percentage_parts) if percentage_parts else "0%"
             else:
                 for month in self.quarter_months:
                     target = int(targets[name].get(month, 0))
@@ -1214,9 +1333,65 @@ class EligoReportGenerator:
             for month_idx, month in enumerate(self.quarter_months):
                 logger.info(f"\n  {month}:")
                 
-                if is_external or is_common_area:
-                    logger.info(f"    (External/Common Area - skipping tower logic)")
+                # ===== PERCENTAGE-BASED ACTIVITIES =====
+                if activity_data_type == 'percentage':
+                    logger.info(f"    [PERCENTAGE-BASED]")
+                    
+                    # First try to get value from tracker (counts)
+                    month_value = counts[name].get(month, 0)
+                    has_tracker = month in months_with_trackers[name]
+                    
+                    logger.info(f"    Tracker value: {month_value}, Has tracker: {has_tracker}")
+                    
+                    # If no tracker data, use KRA target value
+                    if not has_tracker or month_value == 0:
+                        kra_target = targets[name].get(month, 0)
+                        logger.info(f"    No tracker data, using KRA target: {kra_target}")
+                        month_value = kra_target
+                    
+                    try:
+                        if isinstance(month_value, str):
+                            pct = float(month_value.strip('%'))
+                        else:
+                            pct = float(month_value)
+                    except (ValueError, TypeError, AttributeError):
+                        pct = 0.0
+                    
+                    # Convert decimal to percentage if needed (0.33 → 33, 0.01 → 1, 1.0 → 100)
+                    if 0 <= pct < 1:
+                        pct = pct * 100
+                    elif pct == 1.0:
+                        pct = 100.0
+                    
+                    pct = min(max(pct, 0.0), 100.0)
+                    
+                    # Format as integer if whole number
+                    if pct == int(pct):
+                        pct_display = f"{int(pct)}%"
+                    else:
+                        pct_display = f"{pct:.1f}%"
+                    
+                    logger.info(f"    Final percentage: {pct_display}")
+                    
+                    row[f"% Work Done against Target-Till {month}"] = pct_display
+                    
+                    # NEW: Display tracker percentage value in "Target achieved in {month}"
+                    if has_tracker:
+                        row[f"Target achieved in {month}"] = ""
+                    else:
+                        row[f"Target achieved in {month}"] = ""
+                    
+                    last_pct = pct
+                
+                # ===== EXTERNAL/COMMON AREA ACTIVITIES =====
+                elif is_external or is_common_area:
+                    logger.info(f"    [EXTERNAL/COMMON AREA]")
+                    row[f"% Work Done against Target-Till {month}"] = ""
+                    row[f"Target achieved in {month}"] = ""
+                
+                # ===== COUNT-BASED ACTIVITIES =====
                 else:
+                    logger.info(f"    [COUNT-BASED]")
                     month_done = counts[name].get(month, 0)
                     month_target = int(targets[name].get(month, 0))
                     has_tracker = month in months_with_trackers[name]
@@ -1224,42 +1399,20 @@ class EligoReportGenerator:
                     logger.info(f"    Done: {month_done}, Target: {month_target}, Has Tracker: {has_tracker}")
                     
                     if has_tracker:
-                    # Reset cumulative if tracker changed (tower only)
-                        if is_tower:
-                            current_tracker = tracker_file_used[name].get(month)
-                            tracker_changed = (last_tracker_file is not None and 
-                                             current_tracker != last_tracker_file and 
-                                             current_tracker is not None)
-                            
-                            if tracker_changed:
-                                logger.info(f"    >>> TRACKER CHANGED - Resetting cumulative")
-                                cum_done = month_done
-                                cum_target = month_target
-                            else:
-                                cum_done += month_done
-                                cum_target += month_target
-                            
-                            if current_tracker is not None:
-                                last_tracker_file = current_tracker
-                        else:
-                            cum_done += month_done
-                            cum_target += month_target
-                        
+                        cum_done += month_done
+                        cum_target += month_target
                         total_achieved += month_done
                         
                         logger.info(f"    Cumulative: {cum_done}/{cum_target}")
                         
-                        # ===== NEW LOGIC: Calculate percentage =====
+                        # Calculate percentage
                         if cum_done > 0 and cum_target == 0:
-                            # If we have done units but no target, show 100%
                             pct = 100.0
-                            logger.info(f"    Logic: Done({cum_done}) > Target({cum_target}) → 100%")
+                            logger.info(f"    Logic: Done({cum_done}) > 0 and Target({cum_target}) == 0 → 100%")
                         elif cum_target == 0:
-                            # If both are 0, show 0%
                             pct = 0.0
                             logger.info(f"    Logic: Done and Target both 0 → 0%")
                         else:
-                            # Normal calculation
                             pct = (cum_done / cum_target) * 100
                             logger.info(f"    Logic: ({cum_done}/{cum_target}) * 100 = {pct}%")
                         
@@ -1267,23 +1420,25 @@ class EligoReportGenerator:
                         pct = round(pct, 2)
                         
                         logger.info(f"    Percentage: {pct}%")
-                        # ==========================================
                         
                         row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
                         row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
                         last_pct = pct
-                        
+                    
                     else:
                         logger.info(f"    NO TRACKER - leaving blank")
                         row[f"% Work Done against Target-Till {month}"] = ""
                         row[f"Target achieved in {month}"] = f"0 out of {int(month_target)} {unit_plural}"
             
+            # ===== SET TOTAL ACHIEVED =====
             if is_external or is_common_area:
                 row["Total achieved"] = "N/A"
+            elif activity_data_type == 'percentage':
+                row["Total achieved"] = ""
             else:
                 row["Total achieved"] = f"{int(total_achieved)} {unit_plural}"
-            
-            row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+
+                row["Weighted Delay against Targets"] = f"{int(last_pct * weightage / 100)}%"
             
             logger.info(f"\nFinal row:")
             logger.info(f"  Total achieved: {row['Total achieved']}")

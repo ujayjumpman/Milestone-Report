@@ -356,7 +356,7 @@
 #     # Find header row (look for "Blocks" in column A)
 #     header_row = None
 #     for row_idx in range(1, min(10, ws.max_row + 1)):
-#         cell_value = ws.cell(row=row_idx, column=1).value
+#         cell_value = ws.cell(row=row_idx, column=1).values
 #         if cell_value and 'block' in str(cell_value).lower():
 #             header_row = row_idx
 #             logger.info(f"Found header row at row {header_row}")
@@ -926,7 +926,6 @@
 
 
 
-
 import os
 import re
 import logging
@@ -1207,7 +1206,7 @@ def get_tracker_for_month(cos, report_month, month_year):
     logger.info(f"Total files in {TRACKER_FOLDER}: {len(all_files)}")
     
     # Pattern to match Structure Work tracker files
-    tracker_pattern = r'Structure\s+Work\s+Tracker.*\.xlsx'
+    tracker_pattern = r'Structure.*Work.*Tracker.*Wave.*City.*Club.*\.xlsx$'
     
     matching_files = []
     

@@ -819,10 +819,16 @@ class VerdiaReportGenerator:
                 tracker_month = self.tracker_months[idx]
                 tracker_month_num = MONTH_TO_NUM.get(tracker_month)
                 
+                # Determine tracker year based on quarter
                 tracker_year = self.quarter_year
-                if self.current_quarter == 'Q3' and tracker_month in ['January', 'February']:
-                    tracker_year = self.quarter_year + 1
+                
+                # Q3 2026: report months are Dec 2025, Jan 2026, Feb 2026
+                # tracker months (shifted) are Jan 2026, Feb 2026, Mar 2026
+                if self.current_quarter == 'Q3':
+                    # For Q3, tracker_year is always quarter_year (2026)
+                    tracker_year = self.quarter_year
                 elif self.current_quarter == 'Q4' and tracker_month == 'June':
+                    # Only June tracker goes to next year for Q4
                     tracker_year = self.quarter_year + 1
                 
                 found = False
@@ -1172,7 +1178,7 @@ class VerdiaReportGenerator:
     
     def write_report(self, report_dfs):
         """Write Excel report"""
-        filename = f"Veridia_Milestone_Report_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
+        filename = f"Veridia_Milestone_Report_{self.current_quarter}_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
         
         wb = Workbook()
         ws = wb.active

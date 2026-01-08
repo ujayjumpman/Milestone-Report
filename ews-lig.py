@@ -988,68 +988,54 @@ class ewsligReportGenerator:
         return True
     
     def find_trackers(self):
-        """Find tracker files for EWS/LIG with month shifting"""
-        logger.info("\n=== FINDING TRACKER FILES (WITH MONTH SHIFTING) ===")
+        """Find tracker files with month shifting logic"""
+        logger.info("\n=== FINDING TRACKER FILES ===")
         
-        ewslig_files = list_files(self.cos, "EWS LIG P4/")
+        veridia_files = list_files(self.cos, "EWS LIG P4/")
         
-        # First pass: find latest year for each month across all files
-        latest_year_by_month = {}
-        files_by_month = {}
-        
-        for file_path in ewslig_files:
-            filename = os.path.basename(file_path)
-            file_date = extract_date_from_filename(filename)
-            
-            if file_date:
-                month_num = file_date.month
-                year = file_date.year
-                
-                if month_num not in files_by_month:
-                    files_by_month[month_num] = []
-                files_by_month[month_num].append((file_path, file_date))
-                
-                if month_num not in latest_year_by_month or year > latest_year_by_month[month_num]:
-                    latest_year_by_month[month_num] = year
-        
-        logger.info(f"Latest years found: {latest_year_by_month}")
-        
-        # Second pass: assign trackers to sections with month shifting
         for section_name in self.kra_data.keys():
             self.tracker_keys[section_name] = {}
-            logger.info(f"\nProcessing section: {section_name}")
             
             if 'External Development' in section_name:
                 tracker_pattern = 'External Development'
-            elif 'Structure' in section_name:
+            elif 'Structure' in section_name or 'Slab' in section_name:
                 tracker_pattern = 'Structure Work Tracker'
             else:
-                tower_match = re.search(r'Tower\s+([A-Z0-9])', section_name, re.IGNORECASE)
+                tower_match = re.search(r'(Tower \d+|Green \d+)', section_name, re.IGNORECASE)
                 if not tower_match:
                     continue
-                tracker_pattern = f'Tower {tower_match.group(1).upper()}.*Finishing'
+                tracker_pattern = f'{tower_match.group(1)}.*Tracker'
+            
+            logger.info(f"\nLooking for: {tracker_pattern}")
             
             for idx, report_month in enumerate(self.quarter_months):
-                # Get shifted tracker month (next month)
                 tracker_month = self.tracker_months[idx]
                 tracker_month_num = MONTH_TO_NUM.get(tracker_month)
-                latest_year = latest_year_by_month.get(tracker_month_num)
                 
-                logger.info(f"{report_month} → fetching from {tracker_month} tracker")
+                # Determine tracker year based on quarter
+                tracker_year = self.quarter_year
                 
-                if latest_year is None:
-                    logger.warning(f"{report_month} (tracker: {tracker_month}): No files found")
-                    continue
+                # Q3 2026: report months are Dec 2025, Jan 2026, Feb 2026
+                # tracker months (shifted) are Jan 2026, Feb 2026, Mar 2026
+                if self.current_quarter == 'Q3':
+                    # For Q3, tracker_year is always quarter_year (2026)
+                    tracker_year = self.quarter_year
+                elif self.current_quarter == 'Q4' and tracker_month == 'June':
+                    # Only June tracker goes to next year for Q4
+                    tracker_year = self.quarter_year + 1
                 
                 found = False
-                for file_path, file_date in files_by_month.get(tracker_month_num, []):
+                for file_path in veridia_files:
                     filename = os.path.basename(file_path)
                     
-                    if file_date.year == latest_year and re.search(tracker_pattern, filename, re.IGNORECASE):
-                        self.tracker_keys[section_name][report_month] = file_path
-                        logger.info(f"{report_month} ({file_date.year}): {filename}")
-                        found = True
-                        break
+                    if re.search(tracker_pattern, filename, re.IGNORECASE):
+                        file_date = extract_date_from_filename(filename)
+                        
+                        if file_date and file_date.month == tracker_month_num and file_date.year == tracker_year:
+                            self.tracker_keys[section_name][report_month] = file_path
+                            logger.info(f"{report_month} (tracker: {tracker_month}): {filename}")
+                            found = True
+                            break
                 
                 if not found:
                     logger.warning(f"{report_month} (tracker: {tracker_month}): Not found")
@@ -1360,13 +1346,13 @@ class ewsligReportGenerator:
     
     def write_report(self, report_dfs):
         """Write Excel report"""
-        filename = f"EWS-LIG_Milestone_Report_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
+        filename = f"Ews_lig_Milestone_Report_{self.current_quarter}_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
         
         wb = Workbook()
         ws = wb.active
         ws.title = "Time Delivery Milestones"
         
-        ws.append([f"EWS-LIG Time Delivery Milestones Report - {self.current_quarter} ({', '.join(self.quarter_months)}) {self.quarter_year}"])
+        ws.append([f"ews_lig Time Delivery Milestones Report - {self.current_quarter} ({', '.join(self.quarter_months)}) {self.quarter_year}"])
         ws.append([f"Report Generated on: {datetime.now().strftime('%d-%m-%Y')}"])
         ws.append([])
         
@@ -1383,43 +1369,82 @@ class ewsligReportGenerator:
         for section_name in sorted_report_dfs.keys():
             df = sorted_report_dfs[section_name]
             
-            num_cols = len(df.columns) if not df.empty else 8
-            
             ws.append([f"{section_name} Progress Against Milestones"])
             title_row = ws.max_row
+            
+            if not df.empty:
+                num_cols = len(df.columns)
+            else:
+                num_cols = 11
+            
             ws.merge_cells(f'A{title_row}:{get_column_letter(num_cols)}{title_row}')
             ws[f'A{title_row}'].font = bold
             ws[f'A{title_row}'].fill = grey
             ws[f'A{title_row}'].alignment = center
             
             if df.empty:
-                continue
-            
-            for r in dataframe_to_rows(df, index=False, header=True):
-                ws.append(r)
-            
-            header_row = title_row + 1
-            for col_idx in range(1, len(df.columns) + 1):
-                ws.cell(header_row, col_idx).font = bold
-                ws.cell(header_row, col_idx).fill = grey
-                ws.cell(header_row, col_idx).border = border
-            
-            for row in ws.iter_rows(header_row + 1, ws.max_row):
-                for col_idx, cell in enumerate(row, 1):
+                header_cols = ["Milestone", "Activity", "Target"]
+                for m in self.quarter_months:
+                    header_cols.append(f"% Work Done against Target-Till {m}")
+                header_cols.extend(["Weightage", "Weighted Delay against Targets"])
+                for m in self.quarter_months:
+                    header_cols.append(f"Target achieved in {m}")
+                header_cols.extend(["Total achieved", f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}"])
+                
+                ws.append(header_cols)
+                header_row = ws.max_row
+                
+                for col_idx in range(1, len(header_cols) + 1):
+                    ws.cell(header_row, col_idx).font = bold
+                    ws.cell(header_row, col_idx).fill = grey
+                    ws.cell(header_row, col_idx).border = border
+                    ws.cell(header_row, col_idx).alignment = center
+                
+                logger.warning(f"No activities found for {section_name}")
+            else:
+                for r in dataframe_to_rows(df, index=False, header=True):
+                    ws.append(r)
+                
+                header_row = title_row + 1
+                for col_idx in range(1, len(df.columns) + 1):
+                    ws.cell(header_row, col_idx).font = bold
+                    ws.cell(header_row, col_idx).fill = grey
+                    ws.cell(header_row, col_idx).border = border
+                
+                for row in ws.iter_rows(title_row + 2, ws.max_row):
+                    for col_idx, cell in enumerate(row, 1):
+                        cell.border = border
+                        cell.alignment = center if cell.column > 2 else left
+                
+                # Calculate and display total delay
+                try:
+                    total_delay = sum(
+                        float(str(v).strip().rstrip('%')) 
+                        for v in df["Weighted Delay against Targets"] 
+                        if v and str(v).strip() != ""
+                    )
+                except (ValueError, AttributeError):
+                    total_delay = 0
+                
+                ws.append(["Total"])
+                total_row = ws.max_row
+                
+                # Find the column index for "Weighted Delay against Targets"
+                weighted_delay_col_idx = None
+                for col_idx, col_name in enumerate(df.columns, 1):
+                    if col_name == "Weighted Delay against Targets":
+                        weighted_delay_col_idx = col_idx
+                        break
+                
+                # Write total delay value in the correct column
+                if weighted_delay_col_idx:
+                    ws.cell(total_row, weighted_delay_col_idx).value = f"{round(total_delay, 2)}%"
+                
+                # Format total row
+                for cell in ws[total_row]:
+                    cell.font = bold
+                    cell.fill = yellow
                     cell.border = border
-                    cell.alignment = center if col_idx > 2 else left
-            
-            try:
-                total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"])
-            except:
-                total_delay = 0
-            
-            ws.append(["Total Delay"])
-            total_row = ws.max_row
-            for cell in ws[total_row]:
-                cell.font = bold
-                cell.fill = yellow
-                cell.border = border
             
             ws.append([])
         

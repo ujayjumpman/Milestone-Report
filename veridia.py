@@ -964,7 +964,7 @@ class VerdiaReportGenerator:
     
     
     def _build_dataframe(self, section_name, activities, targets, counts, data_types, 
-                        activity_tracker_months=None, months_with_tracker=None):
+                    activity_tracker_months=None, months_with_tracker=None):
         """Build milestone dataframe - show all KRA targets, only cumulate with trackers"""
         data = []
         total_acts = len(activities)
@@ -1041,6 +1041,14 @@ class VerdiaReportGenerator:
             last_pct = None
             any_tracker_seen = False
     
+            # For non-external: Check if work exists in ANY month to show cumulative progress
+            has_any_tracker_data = False
+            if not is_external:
+                for month in self.quarter_months:
+                    if counts[name].get(month) is not None:
+                        has_any_tracker_data = True
+                        break
+    
             for month in self.quarter_months:
                 month_done = counts[name].get(month)
                 month_target = targets[name].get(month, 0)
@@ -1078,25 +1086,39 @@ class VerdiaReportGenerator:
                     last_pct = achievement_against_target
     
                 else:
-                    if month_done is not None:
-                        month_done = int(month_done)
-                        month_target = int(month_target)
+                    # TOWER/STRUCTURE LOGIC
+                    # If there's tracker data anywhere, show cumulative progress
+                    if has_any_tracker_data:
+                        if month_done is not None:
+                            month_done = int(month_done)
+                            month_target = int(month_target)
     
-                        cum_done += month_done
-                        cum_target += month_target
-                        total_achieved += month_done
+                            cum_done += month_done
+                            cum_target += month_target
+                            total_achieved += month_done
     
-                        pct = 0.0 if cum_target == 0 else (cum_done / cum_target) * 100
-                        pct = min(pct, 100.0)
-                        pct = round(pct, 2)
+                            # If a month has a target, calculate progress against it
+                            if month_target > 0:
+                                pct = (cum_done / cum_target) * 100 if cum_target > 0 else 0.0
+                            else:
+                                # No target in this month, but work exists - show cumulative progress
+                                pct = (cum_done / cum_target) * 100 if cum_target > 0 else 100.0
+                            
+                            pct = min(pct, 100.0)
+                            pct = round(pct, 2)
     
-                        row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
-                        row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
-                        last_pct = pct
+                            row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
+                            row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
+                            last_pct = pct
+                        else:
+                            # No data for this month yet
+                            month_target = int(month_target)
+                            row[f"% Work Done against Target-Till {month}"] = ""
+                            row[f"Target achieved in {month}"] = f"0 out of {month_target} {unit_plural}"
                     else:
+                        # No tracker data at all - leave blank
                         row[f"% Work Done against Target-Till {month}"] = ""
-                        month_target = int(month_target)
-                        row[f"Target achieved in {month}"] = f"0 out of {month_target} {unit_plural}"
+                        row[f"Target achieved in {month}"] = ""
     
             # Calculate Weighted Delay (only if tracker data exists)
             if is_external:
@@ -1110,10 +1132,14 @@ class VerdiaReportGenerator:
                     row["Total achieved"] = ""
                     row["Weighted Delay against Targets"] = ""
             else:
-                row["Total achieved"] = f"{int(total_achieved)} {unit_plural}"
-                if last_pct is not None:
-                    row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+                if has_any_tracker_data:
+                    row["Total achieved"] = f"{int(total_achieved)} {unit_plural}"
+                    if last_pct is not None:
+                        row["Weighted Delay against Targets"] = f"{round((last_pct * weightage) / 100, 2)}%"
+                    else:
+                        row["Weighted Delay against Targets"] = ""
                 else:
+                    row["Total achieved"] = ""
                     row["Weighted Delay against Targets"] = ""
             
             # CRITICAL: ALWAYS keep Delay Reasons blank
@@ -1248,13 +1274,31 @@ class VerdiaReportGenerator:
                         cell.border = border
                         cell.alignment = center if cell.column > 2 else left
                 
+                # Calculate and display total delay
                 try:
-                    total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"] if v and str(v).strip() != "")
-                except:
+                    total_delay = sum(
+                        float(str(v).strip().rstrip('%')) 
+                        for v in df["Weighted Delay against Targets"] 
+                        if v and str(v).strip() != ""
+                    )
+                except (ValueError, AttributeError):
                     total_delay = 0
                 
-                ws.append(["Total Delay"])
+                ws.append(["Total"])
                 total_row = ws.max_row
+                
+                # Find the column index for "Weighted Delay against Targets"
+                weighted_delay_col_idx = None
+                for col_idx, col_name in enumerate(df.columns, 1):
+                    if col_name == "Weighted Delay against Targets":
+                        weighted_delay_col_idx = col_idx
+                        break
+                
+                # Write total delay value in the correct column
+                if weighted_delay_col_idx:
+                    ws.cell(total_row, weighted_delay_col_idx).value = f"{round(total_delay, 2)}%"
+                
+                # Format total row
                 for cell in ws[total_row]:
                     cell.font = bold
                     cell.fill = yellow

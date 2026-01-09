@@ -1215,7 +1215,7 @@ class EligoReportGenerator:
         return report_dfs
     
     def _build_dataframe(self, section_name, activities, targets, counts, data_types, 
-                activity_tracker_months=None, months_with_trackers=None, tracker_file_used=None):
+        activity_tracker_months=None, months_with_trackers=None, tracker_file_used=None):
         """Build milestone dataframe with debug logging - handles count and percentage data types"""
         data = []
         total_acts = len(activities)
@@ -1291,7 +1291,7 @@ class EligoReportGenerator:
             if is_external or is_common_area:
                 row["Target"] = "External/Common Area"
             elif activity_data_type == 'percentage':
-                # For percentage activities, show values with month names
+                # For percentage activities, show ONLY non-zero values with month names
                 percentage_parts = []
                 for month in self.quarter_months:
                     target_val = targets[name].get(month, 0)
@@ -1312,7 +1312,10 @@ class EligoReportGenerator:
                     except (ValueError, TypeError):
                         target_val = 0
                     
-                    percentage_parts.append(f"{target_val}% ({month})")
+                    # MODIFIED: Only add to display if value is > 0
+                    if target_val > 0:
+                        percentage_parts.append(f"{target_val}% ({month})")
+                
                 row["Target"] = ", ".join(percentage_parts) if percentage_parts else "0%"
             else:
                 for month in self.quarter_months:
@@ -1335,53 +1338,131 @@ class EligoReportGenerator:
                 
                 # ===== PERCENTAGE-BASED ACTIVITIES =====
                 if activity_data_type == 'percentage':
-                    logger.info(f"    [PERCENTAGE-BASED]")
-                    
-                    # First try to get value from tracker (counts)
-                    month_value = counts[name].get(month, 0)
-                    has_tracker = month in months_with_trackers[name]
-                    
-                    logger.info(f"    Tracker value: {month_value}, Has tracker: {has_tracker}")
-                    
-                    # If no tracker data, use KRA target value
-                    if not has_tracker or month_value == 0:
-                        kra_target = targets[name].get(month, 0)
-                        logger.info(f"    No tracker data, using KRA target: {kra_target}")
-                        month_value = kra_target
-                    
-                    try:
-                        if isinstance(month_value, str):
-                            pct = float(month_value.strip('%'))
-                        else:
-                            pct = float(month_value)
-                    except (ValueError, TypeError, AttributeError):
-                        pct = 0.0
-                    
-                    # Convert decimal to percentage if needed (0.33 → 33, 0.01 → 1, 1.0 → 100)
-                    if 0 <= pct < 1:
-                        pct = pct * 100
-                    elif pct == 1.0:
-                        pct = 100.0
-                    
-                    pct = min(max(pct, 0.0), 100.0)
-                    
-                    # Format as integer if whole number
-                    if pct == int(pct):
-                        pct_display = f"{int(pct)}%"
-                    else:
-                        pct_display = f"{pct:.1f}%"
-                    
-                    logger.info(f"    Final percentage: {pct_display}")
-                    
-                    row[f"% Work Done against Target-Till {month}"] = pct_display
-                    
-                    # NEW: Display tracker percentage value in "Target achieved in {month}"
-                    if has_tracker:
-                        row[f"Target achieved in {month}"] = ""
-                    else:
-                        row[f"Target achieved in {month}"] = ""
-                    
-                    last_pct = pct
+                   logger.info(f"    [PERCENTAGE-BASED]")
+                   
+                   # Get value from tracker (counts) - this contains the % Complete value
+                   month_value = counts[name].get(month, 0)
+                   has_tracker = month in months_with_trackers[name]
+                   
+                   # Find which month has the KRA target (e.g., February for "33% (February)")
+                   target_month_index = None
+                   target_pct = None
+                   for idx, m in enumerate(self.quarter_months):
+                       kra_target = targets[name].get(m, 0)
+                       if kra_target != 0:
+                           target_month_index = idx
+                           try:
+                               target_pct = float(kra_target)
+                               if 0 <= target_pct < 1:
+                                   target_pct = target_pct * 100
+                               elif target_pct == 1.0:
+                                   target_pct = 100.0
+                           except (ValueError, TypeError):
+                               target_pct = 0.0
+                           break
+                   
+                   logger.info(f"    Target month index: {target_month_index}, Target %: {target_pct}")
+                   logger.info(f"    Current month index: {month_idx}")
+                   logger.info(f"    Tracker % Complete value: {month_value}, Has tracker: {has_tracker}")
+                   
+                   # Check if month_value is actually meaningful (not just 0 from initialization)
+                   has_meaningful_tracker_value = has_tracker and month_value != 0
+                   
+                   logger.info(f"    Has meaningful tracker value: {has_meaningful_tracker_value}")
+                   
+                   # NEW LOGIC: Prioritize KRA target forward-fill over tracker data
+                   if target_month_index is not None and target_pct is not None:
+                       # Has KRA target → Use forward-fill logic
+                       
+                       if month_idx < target_month_index:
+                           # Before target month → Always show 100% (regardless of tracker)
+                           logger.info(f"    Before target month → Show 100% in BOTH columns")
+                           row[f"% Work Done against Target-Till {month}"] = "100%"
+                           row[f"Target achieved in {month}"] = "100%"
+                           last_pct = 100.0
+                           
+                       elif month_idx == target_month_index:
+                           # Target month itself → Check if tracker has data
+                           if has_meaningful_tracker_value:
+                               # Use tracker data for target month
+                               try:
+                                   if isinstance(month_value, str):
+                                       pct = float(month_value.strip('%'))
+                                   else:
+                                       pct = float(month_value)
+                               except (ValueError, TypeError, AttributeError):
+                                   pct = target_pct
+                               
+                               if 0 <= pct < 1:
+                                   pct = pct * 100
+                               elif pct == 1.0:
+                                   pct = 100.0
+                               
+                               pct = min(max(pct, 0.0), 100.0)
+                               
+                               if pct == int(pct):
+                                   pct_display = f"{int(pct)}%"
+                               else:
+                                   pct_display = f"{pct:.1f}%"
+                               
+                               logger.info(f"    Target month with tracker → {pct_display}")
+                               row[f"% Work Done against Target-Till {month}"] = ""
+                               row[f"Target achieved in {month}"] = f"{pct_display} Complete"
+                               last_pct = pct
+                           else:
+                               # No tracker, use KRA target
+                               if target_pct == int(target_pct):
+                                   pct_display = f"{int(target_pct)}%"
+                               else:
+                                   pct_display = f"{target_pct:.1f}%"
+                               
+                               logger.info(f"    Target month without tracker → {pct_display}")
+                               row[f"% Work Done against Target-Till {month}"] = ""
+                               row[f"Target achieved in {month}"] = pct_display
+                               last_pct = target_pct
+                               
+                       else:
+                           # After target month → Blank
+                           logger.info(f"    After target month → Blank in both columns")
+                           row[f"% Work Done against Target-Till {month}"] = ""
+                           row[f"Target achieved in {month}"] = ""
+                   
+                   elif has_meaningful_tracker_value:
+                       # Has tracker but no KRA target → Show tracker value
+                       try:
+                           if isinstance(month_value, str):
+                               pct = float(month_value.strip('%'))
+                           else:
+                               pct = float(month_value)
+                       except (ValueError, TypeError, AttributeError):
+                           pct = 0.0
+                       
+                       logger.info(f"    Has meaningful tracker (no KRA target) → {month_value}")
+                       
+                       if 0 <= pct < 1:
+                           pct = pct * 100
+                       elif pct == 1.0:
+                           pct = 100.0
+                       
+                       pct = min(max(pct, 0.0), 100.0)
+                       
+                       if pct == int(pct):
+                           pct_display = f"{int(pct)}%"
+                       else:
+                           pct_display = f"{pct:.1f}%"
+                       
+                       logger.info(f"    Final percentage: {pct_display}")
+                       
+                       row[f"% Work Done against Target-Till {month}"] = pct_display
+                       row[f"Target achieved in {month}"] = f"{pct_display} Complete"
+                       last_pct = pct
+                   
+                   else:
+                       # No KRA target and no meaningful tracker → KEEP BLANK
+                       logger.info("    No KRA target and no meaningful tracker → leave blank")
+                       row[f"% Work Done against Target-Till {month}"] = ""
+                       row[f"Target achieved in {month}"] = ""
+    
                 
                 # ===== EXTERNAL/COMMON AREA ACTIVITIES =====
                 elif is_external or is_common_area:
@@ -1433,11 +1514,14 @@ class EligoReportGenerator:
             # ===== SET TOTAL ACHIEVED =====
             if is_external or is_common_area:
                 row["Total achieved"] = "N/A"
+                row["Weighted Delay against Targets"] = ""
             elif activity_data_type == 'percentage':
                 row["Total achieved"] = ""
+                # Calculate weighted delay for percentage activities
+                weighted_delay = last_pct * weightage / 100
+                row["Weighted Delay against Targets"] = f"{int(weighted_delay)}%"
             else:
                 row["Total achieved"] = f"{int(total_achieved)} {unit_plural}"
-
                 row["Weighted Delay against Targets"] = f"{int(last_pct * weightage / 100)}%"
             
             logger.info(f"\nFinal row:")
@@ -1502,13 +1586,13 @@ class EligoReportGenerator:
     
     def write_report(self, report_dfs):
         """Write Excel report"""
-        filename = f"ELIGO_Milestone_Report_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
+        filename = f"Eligo_Milestone_Report_{self.current_quarter}_{self.quarter_year}_{datetime.now():%Y%m%d}.xlsx"
         
         wb = Workbook()
         ws = wb.active
         ws.title = "Time Delivery Milestones"
         
-        ws.append([f"ELIGO Time Delivery Milestones Report - {self.current_quarter} ({', '.join(self.quarter_months)}) {self.quarter_year}"])
+        ws.append([f"Eligo Time Delivery Milestones Report - {self.current_quarter} ({', '.join(self.quarter_months)}) {self.quarter_year}"])
         ws.append([f"Report Generated on: {datetime.now().strftime('%d-%m-%Y')}"])
         ws.append([])
         
@@ -1525,49 +1609,82 @@ class EligoReportGenerator:
         for section_name in sorted_report_dfs.keys():
             df = sorted_report_dfs[section_name]
             
-            # Determine number of columns for merge
-            num_cols = len(df.columns) if not df.empty else 8
-            
-            # Add section title
             ws.append([f"{section_name} Progress Against Milestones"])
             title_row = ws.max_row
+            
+            if not df.empty:
+                num_cols = len(df.columns)
+            else:
+                num_cols = 11
+            
             ws.merge_cells(f'A{title_row}:{get_column_letter(num_cols)}{title_row}')
             ws[f'A{title_row}'].font = bold
             ws[f'A{title_row}'].fill = grey
             ws[f'A{title_row}'].alignment = center
             
             if df.empty:
-                continue
-            
-            # Add dataframe rows (includes header as first row)
-            for r in dataframe_to_rows(df, index=False, header=True):
-                ws.append(r)
-            
-            # Format header row
-            header_row = title_row + 1
-            for col_idx in range(1, len(df.columns) + 1):
-                ws.cell(header_row, col_idx).font = bold
-                ws.cell(header_row, col_idx).fill = grey
-                ws.cell(header_row, col_idx).border = border
-            
-            # Format data rows
-            for row in ws.iter_rows(header_row + 1, ws.max_row):
-                for col_idx, cell in enumerate(row, 1):
+                header_cols = ["Milestone", "Activity", "Target"]
+                for m in self.quarter_months:
+                    header_cols.append(f"% Work Done against Target-Till {m}")
+                header_cols.extend(["Weightage", "Weighted Delay against Targets"])
+                for m in self.quarter_months:
+                    header_cols.append(f"Target achieved in {m}")
+                header_cols.extend(["Total achieved", f"Delay Reasons_{self.quarter_months[-1]} {self.quarter_year}"])
+                
+                ws.append(header_cols)
+                header_row = ws.max_row
+                
+                for col_idx in range(1, len(header_cols) + 1):
+                    ws.cell(header_row, col_idx).font = bold
+                    ws.cell(header_row, col_idx).fill = grey
+                    ws.cell(header_row, col_idx).border = border
+                    ws.cell(header_row, col_idx).alignment = center
+                
+                logger.warning(f"No activities found for {section_name}")
+            else:
+                for r in dataframe_to_rows(df, index=False, header=True):
+                    ws.append(r)
+                
+                header_row = title_row + 1
+                for col_idx in range(1, len(df.columns) + 1):
+                    ws.cell(header_row, col_idx).font = bold
+                    ws.cell(header_row, col_idx).fill = grey
+                    ws.cell(header_row, col_idx).border = border
+                
+                for row in ws.iter_rows(title_row + 2, ws.max_row):
+                    for col_idx, cell in enumerate(row, 1):
+                        cell.border = border
+                        cell.alignment = center if cell.column > 2 else left
+                
+                # Calculate and display total delay
+                try:
+                    total_delay = sum(
+                        float(str(v).strip().rstrip('%')) 
+                        for v in df["Weighted Delay against Targets"] 
+                        if v and str(v).strip() != ""
+                    )
+                except (ValueError, AttributeError):
+                    total_delay = 0
+                
+                ws.append(["Total"])
+                total_row = ws.max_row
+                
+                # Find the column index for "Weighted Delay against Targets"
+                weighted_delay_col_idx = None
+                for col_idx, col_name in enumerate(df.columns, 1):
+                    if col_name == "Weighted Delay against Targets":
+                        weighted_delay_col_idx = col_idx
+                        break
+                
+                # Write total delay value in the correct column
+                if weighted_delay_col_idx:
+                    ws.cell(total_row, weighted_delay_col_idx).value = f"{round(total_delay, 2)}%"
+                
+                # Format total row
+                for cell in ws[total_row]:
+                    cell.font = bold
+                    cell.fill = yellow
                     cell.border = border
-                    cell.alignment = center if col_idx > 2 else left
-            
-            # Add total delay row
-            try:
-                total_delay = sum(float(str(v).strip('%')) for v in df["Weighted Delay against Targets"])
-            except:
-                total_delay = 0
-            
-            ws.append(["Total Delay"])
-            total_row = ws.max_row
-            for cell in ws[total_row]:
-                cell.font = bold
-                cell.fill = yellow
-                cell.border = border
             
             ws.append([])
         

@@ -1375,11 +1375,19 @@ class EligoReportGenerator:
                        # Has KRA target → Use forward-fill logic
                        
                        if month_idx < target_month_index:
-                           # Before target month → Always show 100% (regardless of tracker)
-                           logger.info(f"    Before target month → Show 100% in BOTH columns")
-                           row[f"% Work Done against Target-Till {month}"] = "100%"
-                           row[f"Target achieved in {month}"] = "100%"
-                           last_pct = 100.0
+                            # Before target month
+                            if has_tracker:
+                                # Has tracker → Show 100%
+                                logger.info(f"    Before target month WITH tracker → Show 100%")
+                                row[f"% Work Done against Target-Till {month}"] = "100%"
+                                row[f"Target achieved in {month}"] = "100%"
+                                last_pct = 100.0
+                            else:
+                                # No tracker → Show 0%
+                                logger.info(f"    Before target month WITHOUT tracker → Show 0%")
+                                row[f"% Work Done against Target-Till {month}"] = ""
+                                row[f"Target achieved in {month}"] = ""
+                                last_pct = 0.0
                            
                        elif month_idx == target_month_index:
                            # Target month itself → Check if tracker has data

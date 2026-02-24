@@ -474,6 +474,19 @@ def find_activity_in_tracker(tracker_wb, tower_name: str, activity_text: str, mo
             logger.info(f"    ⚠️ HARDCODED: {tower_name} for December set to 0%")
             return 0.0  # Return 0% for NTA-05 in December
     # ======================= END HARDCODED FIX =======================
+
+    # ======================= HARDCODED FIX FOR NTA-05 JANUARY (LOWER BASEMENT BEAM/SLAB CASTING) =======================
+    # Force 0% for the specific January activity that is currently showing 100%
+    if month and month.lower() == "january":
+        tower_lower = tower_name.lower()
+        nta_05_patterns = ["nta 05", "nta-05", "nta05"]
+        if any(p in tower_lower for p in nta_05_patterns):
+            act_norm = normalize_text(activity_text)
+            # Match robustly regardless of newlines/slashes/punctuation
+            if all(k in act_norm for k in ["lower basement", "beam slab", "casting work"]):
+                logger.info(f"    ⚠️ HARDCODED: {tower_name} January 'Lower Basement → Beam/Slab → Casting Work' set to 0%")
+                return 0.0
+    # ======================= END HARDCODED FIX =======================
     
     # Extract base tower name for sheet matching
     base_tower = tower_name
@@ -2136,4 +2149,3 @@ if __name__ == "__main__":
 
 # if __name__ == "__main__":
 #     main()
-

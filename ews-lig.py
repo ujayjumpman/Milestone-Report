@@ -205,7 +205,6 @@ class DynamicKRAParser:
                 continue
 
             cell_value = str(cell.value).strip()
-
             # Skip NTA sections entirely
             if re.search(r'\bNTA\b', cell_value, re.IGNORECASE):
                 logger.info(f"Skipping NTA section: '{cell_value}'")

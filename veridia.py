@@ -341,6 +341,18 @@ class DynamicKRAParser:
 # ============================================================================
 class TowerTrackerParser:
     """Parse tower tracker files"""
+
+    @staticmethod
+    def normalize_activity(text):
+        """Normalize activity text for tighter matching."""
+        if text is None:
+            return ""
+        s = str(text).strip().lower()
+        # Keep alphanumerics and spaces only
+        s = re.sub(r"[^a-z0-9 ]+", " ", s)
+        # Collapse whitespace
+        s = re.sub(r"\s+", " ", s).strip()
+        return s
     
     @staticmethod
     def find_headers(ws):
@@ -409,7 +421,8 @@ class TowerTrackerParser:
                     if not activity_cell:
                         continue
                     
-                    if activity_name.lower() not in str(activity_cell).strip().lower():
+                    # Tight match: normalized activity name must equal normalized cell text
+                    if cls.normalize_activity(activity_name) != cls.normalize_activity(activity_cell):
                         continue
                     
                     finish_date = cls.parse_date(finish_cell)

@@ -1518,6 +1518,13 @@ class EligoReportGenerator:
                         logger.info(f"    NO TRACKER - leaving blank")
                         row[f"% Work Done against Target-Till {month}"] = ""
                         row[f"Target achieved in {month}"] = f"0 out of {int(month_target)} {unit_plural}"
+
+            # ===== HARD-CODED OVERRIDES FOR FEBRUARY (USER REQUEST) =====
+            if 'February' in self.quarter_months:
+                if re.search(r'\bTower\s*F\b', section_name, re.IGNORECASE) and name.strip().lower() == 'external paint 1st coat':
+                    row["% Work Done against Target-Till February"] = "100%"
+                if re.search(r'\bTower\s*G\b', section_name, re.IGNORECASE) and name.strip().lower() == 'lift handover':
+                    row["% Work Done against Target-Till February"] = "0%"
             
             # ===== SET TOTAL ACHIEVED =====
             if is_external or is_common_area:

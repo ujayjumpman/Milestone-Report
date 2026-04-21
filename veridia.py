@@ -996,6 +996,7 @@ class VerdiaReportGenerator:
             name = activity['name']
             unit = activity.get('unit', 'Flat')
             unit_plural = f"{unit}s"
+            has_any_kra_target = any((targets[name].get(m, 0) or 0) > 0 for m in self.quarter_months)
     
             # Initialize row with all columns set to empty strings
             row = {
@@ -1012,41 +1013,44 @@ class VerdiaReportGenerator:
             months_available = months_with_tracker.get(name, [])
     
             if is_external:
-                tracker_month = activity_tracker_months.get(name)
-    
-                if tracker_month:
-                    display_month = tracker_month
-                    display_target = int(targets[name].get(tracker_month, 0))
-                    if display_target == 0:
-                        display_target = 100
+                if not has_any_kra_target:
+                    row["Target"] = ""
                 else:
-                    months_with_data = []
-                    for month in self.quarter_months:
-                        month_target = targets[name].get(month, 0)
-                        month_done = counts[name].get(month)
-    
-                        if month_target > 0 or (month_done is not None and month_done > 0):
-                            months_with_data.append(month)
-    
-                    if months_with_data:
-                        display_month = months_with_data[0]
-                        display_target = int(targets[name].get(display_month, 0))
+                    tracker_month = activity_tracker_months.get(name)
+
+                    if tracker_month:
+                        display_month = tracker_month
+                        display_target = int(targets[name].get(tracker_month, 0))
                         if display_target == 0:
                             display_target = 100
                     else:
-                        display_month = self.quarter_months[0]
-                        display_target = 100
-    
-                row["Target"] = f"{display_target}% by {display_month}"
-    
+                        months_with_data = []
+                        for month in self.quarter_months:
+                            month_target = targets[name].get(month, 0)
+                            month_done = counts[name].get(month)
+
+                            if month_target > 0 or (month_done is not None and month_done > 0):
+                                months_with_data.append(month)
+
+                        if months_with_data:
+                            display_month = months_with_data[0]
+                            display_target = int(targets[name].get(display_month, 0))
+                            if display_target == 0:
+                                display_target = 100
+                        else:
+                            display_month = self.quarter_months[0]
+                            display_target = 100
+
+                    row["Target"] = f"{display_target}% by {display_month}"
+
             else:
                 for month in self.quarter_months:
                     target = int(targets[name].get(month, 0))
                     total_target += target
                     if target > 0:
                         target_parts.append(f"{target}-{month}")
-    
-                row["Target"] = f"{total_target} {unit_plural} ({', '.join(target_parts)})" if target_parts else f"0 {unit_plural}"
+
+                row["Target"] = f"{total_target} {unit_plural} ({', '.join(target_parts)})" if target_parts else ""
     
             cum_done = 0
             cum_target = 0
@@ -1065,7 +1069,12 @@ class VerdiaReportGenerator:
             for month in self.quarter_months:
                 month_done = counts[name].get(month)
                 month_target = targets[name].get(month, 0)
-    
+
+                if not has_any_kra_target:
+                    row[f"% Work Done against Target-Till {month}"] = ""
+                    row[f"Target achieved in {month}"] = ""
+                    continue
+
                 if is_external:
                     tracker_exists = month in months_available
                 
@@ -1110,19 +1119,18 @@ class VerdiaReportGenerator:
                             cum_target += month_target
                             total_achieved += month_done
     
-                            # If a month has a target, calculate progress against it
-                            if month_target > 0:
-                                pct = (cum_done / cum_target) * 100 if cum_target > 0 else 0.0
+                            # If cumulative target is zero, keep percentage blank.
+                            # This avoids showing 100% when no target exists.
+                            if cum_target > 0:
+                                pct = (cum_done / cum_target) * 100
+                                pct = min(pct, 100.0)
+                                pct = round(pct, 2)
+                                row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
                             else:
-                                # No target in this month, but work exists - show cumulative progress
-                                pct = (cum_done / cum_target) * 100 if cum_target > 0 else 100.0
-                            
-                            pct = min(pct, 100.0)
-                            pct = round(pct, 2)
-    
-                            row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
+                                row[f"% Work Done against Target-Till {month}"] = ""
                             row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
-                            last_pct = pct
+                            if cum_target > 0:
+                                last_pct = pct
                         else:
                             # No data for this month yet
                             month_target = int(month_target)
@@ -1134,7 +1142,10 @@ class VerdiaReportGenerator:
                         row[f"Target achieved in {month}"] = ""
     
             # Calculate Weighted Delay (only if tracker data exists)
-            if is_external:
+            if not has_any_kra_target:
+                row["Total achieved"] = ""
+                row["Weighted Delay against Targets"] = ""
+            elif is_external:
                 if any_tracker_seen:
                     row["Total achieved"] = f"{int(total_achieved) if total_achieved == int(total_achieved) else total_achieved}%"
                     if last_pct is not None and last_pct != 0:

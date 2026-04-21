@@ -721,7 +721,7 @@ class StructureWorkParser:
         return None
 
     @classmethod
-    def parse_green_dates(cls, tracker_bytes, section_name, target_month_num=None):
+    def parse_green_dates(cls, tracker_bytes, section_name, target_month_num=None, target_year=None):
         """
         Extract green anticipated dates (slab castings) for a given tower.
         Only returns dates matching the target month — NO fallback to all-month
@@ -745,6 +745,7 @@ class StructureWorkParser:
         logger.info(f"Section name: {section_name}")
         logger.info(f"Normalized tower: {target_tower}")
         logger.info(f"Target month number: {target_month_num}")
+        logger.info(f"Target year: {target_year}")
         logger.info(f"Anticipated columns to scan: {tower_cols}")
 
         try:
@@ -782,6 +783,7 @@ class StructureWorkParser:
 
         for floor_label in sorted(floor_rows.keys(), key=lambda x: (len(x), x)):
             row_idx = floor_rows[floor_label]
+            floor_matched_dates = []
 
             for col_letter, col_idx in zip(tower_cols, col_indices):
                 total_cells_checked += 1
@@ -804,23 +806,39 @@ class StructureWorkParser:
 
                     if parsed_date:
                         # Only count if month matches (no fallback)
-                        if target_month_num is None or parsed_date.month == target_month_num:
-                            green_dates.append(parsed_date)
+                        month_ok = target_month_num is None or parsed_date.month == target_month_num
+                        year_ok = target_year is None or parsed_date.year == target_year
+                        if month_ok and year_ok:
+                            floor_matched_dates.append(parsed_date)
                             logger.info(f"    ✓ COUNTED: {parsed_date.strftime('%d-%b-%Y')}")
                     else:
                         logger.warning(f"    ✗ Could not parse date")
+
+            if floor_matched_dates:
+                latest_floor_date = max(floor_matched_dates)
+                green_dates.append(latest_floor_date)
+                logger.info(
+                    f"  Floor {floor_label}: selected latest green date "
+                    f"{latest_floor_date.strftime('%d-%b-%Y')}"
+                )
 
         logger.info("\n" + "-" * 80)
         logger.info(f"SUMMARY for {target_tower}:")
         logger.info(f"  Total cells checked: {total_cells_checked}")
         logger.info(f"  Green cells found: {green_cells_found}")
-        logger.info(f"  Valid green dates (month {target_month_num}): {len(green_dates)}")
+        logger.info(
+            f"  Valid green dates (month {target_month_num}, year {target_year}, latest-per-floor): "
+            f"{len(green_dates)}"
+        )
 
         if green_dates:
             logger.info(f"  Date range: {min(green_dates).strftime('%d-%b-%Y')} to {max(green_dates).strftime('%d-%b-%Y')}")
 
         if not green_dates:
-            logger.warning(f"⚠ No green anticipated dates found for {target_tower} in month {target_month_num}")
+            logger.warning(
+                f"⚠ No green anticipated dates found for {target_tower} "
+                f"in month {target_month_num}, year {target_year}"
+            )
             logger.info("=" * 80 + "\n")
             return []
 
@@ -1014,7 +1032,7 @@ class ewsligReportGenerator:
                 logger.info(f"Extracting green dates for: {report_month} (month {report_month_num})")
 
                 green_dates = StructureWorkParser.parse_green_dates(
-                    BytesIO(raw), section_name, report_month_num
+                    BytesIO(raw), section_name, report_month_num, self.quarter_year
                 )
 
                 # FIX #3: NO fallback to all-month scan — wrong data otherwise
@@ -1213,15 +1231,19 @@ class ewsligReportGenerator:
 
                 else:
                     if month in months_with_trackers[name]:
-                        cum_done += month_done
-                        cum_target += month_target
-                        total_achieved += month_done
+                        if month_target > 0:
+                            cum_done += month_done
+                            cum_target += month_target
+                            total_achieved += month_done
 
                         pct = 0.0 if cum_target == 0 else min((cum_done / cum_target) * 100, 100.0)
                         pct = round(pct, 2)
 
                         row[f"% Work Done against Target-Till {month}"] = f"{pct}%"
-                        row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
+                        if month_target > 0:
+                            row[f"Target achieved in {month}"] = f"{int(month_done)} out of {int(month_target)} {unit_plural}"
+                        else:
+                            row[f"Target achieved in {month}"] = f"0 out of 0 {unit_plural}"
                         last_pct = pct
                     else:
                         row[f"% Work Done against Target-Till {month}"] = ""

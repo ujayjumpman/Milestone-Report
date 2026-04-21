@@ -210,6 +210,15 @@ class DynamicKRAParser:
                 logger.info(f"Skipping NTA section: '{cell_value}'")
                 continue
 
+            # Skip report/title rows that are not real KRA sections
+            normalized_value = re.sub(r'\s+', ' ', cell_value).strip().lower()
+            if (
+                'kra milestone' in normalized_value
+                or 'progress against milestone' in normalized_value
+            ):
+                logger.info(f"Skipping title/header row: '{cell_value}'")
+                continue
+
             if re.search(
                 r'(Tower|Green|Structure|External Development|External Dev|EWS?[\s\-_]*LI[GS]?|LI[GS]?[\s\-_]*EWS?|EW[\s\-_]*LI|LI[\s\-_]*EW|\bP\s*4\b|\bPH\s*4\b)',
                 cell_value, re.IGNORECASE
@@ -1322,12 +1331,10 @@ class ewsligReportGenerator:
 
         for section_name in sorted_report_dfs.keys():
             df = sorted_report_dfs[section_name]
+            num_cols = len(df.columns) if not df.empty else 11
 
             ws.append([f"{section_name} Progress Against Milestones"])
             title_row = ws.max_row
-
-            num_cols = len(df.columns) if not df.empty else 11
-
             ws.merge_cells(f'A{title_row}:{get_column_letter(num_cols)}{title_row}')
             ws[f'A{title_row}'].font = bold
             ws[f'A{title_row}'].fill = grey

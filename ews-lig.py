@@ -25,7 +25,9 @@ COS_CRN = os.getenv("COS_SERVICE_INSTANCE_CRN")
 COS_ENDPOINT = os.getenv("COS_ENDPOINT")
 BUCKET = os.getenv("COS_BUCKET_NAME")
 
-GREEN_HEX = "FF92D050"
+# Standard Excel "Green" used in the structure tracker (RGB = 92D050).
+# We compare using the last 6 hex digits to tolerate ARGB prefixes like FF/00.
+GREEN_HEX = "92D050"
 
 QUARTERS = {
     'Q1': ['June', 'July', 'August'],
@@ -110,31 +112,45 @@ def extract_number(cell_value):
     match = re.search(r"(\d+\.?\d*)", str(cell_value))
     return float(match.group(1)) if match else 0.0
 
-def get_cell_hex_color(cell):
-    """Extract hex color from cell"""
-    if cell.fill and cell.fill.start_color:
-        color_value = str(cell.fill.start_color.rgb)
-        if color_value.startswith('FF') and len(color_value) > 8:
-            return color_value[2:]
-        return color_value
+def _normalize_hex_color(color_value):
+    """
+    Normalize an Excel/OpenPyXL color string to 6-digit RGB (e.g. '92D050').
+    Accepts ARGB like 'FF92D050' / '0092D050' and returns the last 6 digits.
+    """
+    if not color_value:
+        return None
+
+    s = str(color_value).strip().upper()
+    if not s or s in ("NONE", "00000000"):
+        return None
+
+    # Some values may include '0x' or be longer than expected; keep hex chars only.
+    s = re.sub(r"[^0-9A-F]", "", s)
+    if len(s) >= 6:
+        return s[-6:]
     return None
+
+
+def get_cell_hex_color(cell):
+    """Extract normalized 6-digit RGB hex color from a cell fill (if available)."""
+    fill = getattr(cell, "fill", None)
+    if not fill:
+        return None
+
+    start_color = getattr(fill, "start_color", None)
+    if not start_color:
+        return None
+
+    # NOTE: Conditional formatting colors are not evaluated by openpyxl.
+    rgb = getattr(start_color, "rgb", None)
+    return _normalize_hex_color(rgb)
 
 def is_cell_green(cell, green_hex=GREEN_HEX):
     """Check if cell has green background"""
-    cell_color = get_cell_hex_color(cell)
-    if not cell_color:
+    cell_rgb = get_cell_hex_color(cell)
+    if not cell_rgb:
         return False
-
-    cell_color_normalized = cell_color.upper()
-    target_normalized = green_hex.upper()
-
-    if target_normalized.startswith('FF') and len(target_normalized) == 8:
-        target_normalized = target_normalized[2:]
-
-    if cell_color_normalized.startswith('FF') and len(cell_color_normalized) == 8:
-        cell_color_normalized = cell_color_normalized[2:]
-
-    return cell_color_normalized == target_normalized
+    return cell_rgb.upper() == _normalize_hex_color(green_hex)
 
 def normalize_tower_name(tower_str):
     """
@@ -598,8 +614,42 @@ class StructureWorkParser:
         'LIG Tower 1': ['AL', 'AP', 'AT', 'AX'],
     }
 
+    # NOTE: Do not rely on a fixed floor list. Trackers sometimes include more floors
+    # (15F+), roof/terrace, etc. We detect floor labels dynamically (see _normalize_floor_label).
     FLOOR_LABELS = ['GF', '1F', '2F', '3F', '4F', '5F', '6F', '7F', '8F', '9F',
                     '10F', '11F', '12F', '13F', '14F']
+
+    @staticmethod
+    def _normalize_floor_label(value):
+        """
+        Normalize a floor label from the tracker.
+
+        Accepts common patterns like:
+          - GF / G.F / Ground Floor
+          - 1F, 01F, 1 F
+          - RF / Roof / Terrace
+        Returns normalized label (e.g., 'GF', '1F', 'RF') or None if not a floor label.
+        """
+        if value is None:
+            return None
+
+        s = str(value).strip().upper()
+        if not s:
+            return None
+
+        s_compact = re.sub(r'[\s\.\-_/]+', '', s)
+
+        if s_compact in ("GF", "G", "GROUNDFLOOR"):
+            return "GF"
+
+        m = re.fullmatch(r'0*(\d{1,2})F', s_compact)
+        if m:
+            return f"{int(m.group(1))}F"
+
+        if s_compact in ("RF", "ROOF", "ROOFFLOOR", "TERRACE", "TF", "TOPFLOOR"):
+            return "RF"
+
+        return None
 
     @staticmethod
     def extract_tower_from_section(section_name):
@@ -687,7 +737,7 @@ class StructureWorkParser:
         return None
 
     @staticmethod
-    def find_floor_rows_in_section(ws, section_start_row, max_rows=25):
+    def find_floor_rows_in_section(ws, section_start_row, max_rows=80):
         """Find rows containing floor data within a specific tower section."""
         floor_rows = {}
 
@@ -699,14 +749,13 @@ class StructureWorkParser:
         logger.info(f"Scanning rows {section_start_row} to {end_row} for floor labels...")
 
         for row_idx in range(section_start_row, end_row):
-            for col_idx in range(1, 6):
+            # Floor labels usually appear on the left; scan a bit wider to be safe.
+            for col_idx in range(1, 11):
                 cell_value = ws.cell(row=row_idx, column=col_idx).value
-                if cell_value:
-                    cell_str = str(cell_value).strip().upper()
-                    if cell_str in StructureWorkParser.FLOOR_LABELS:
-                        if cell_str not in floor_rows:
-                            floor_rows[cell_str] = row_idx
-                            logger.info(f"  Found Floor {cell_str} at row {row_idx}")
+                floor_label = StructureWorkParser._normalize_floor_label(cell_value)
+                if floor_label and floor_label not in floor_rows:
+                    floor_rows[floor_label] = row_idx
+                    logger.info(f"  Found Floor {floor_label} at row {row_idx}")
 
         return floor_rows
 
@@ -732,12 +781,18 @@ class StructureWorkParser:
     @classmethod
     def parse_green_dates(cls, tracker_bytes, section_name, target_month_num=None, target_year=None):
         """
-        Extract green anticipated dates (slab castings) for a given tower.
-        Only returns dates matching the target month — NO fallback to all-month
-        scanning (FIX #3: removed the all-month fallback that caused wrong data).
+        Extract anticipated slab casting dates for a given tower.
+
+        IMPORTANT: In many trackers the "green" highlight can be conditional formatting,
+        which openpyxl does NOT evaluate. Relying on cell.fill will undercount.
+        We therefore count dates based on the anticipated columns for the tower,
+        filtered by target month/year.
+
+        Only returns dates matching the target month/year — NO fallback to all-month
+        scanning.
         """
         logger.info("\n" + "=" * 80)
-        logger.info("=== PARSING STRUCTURE - SLAB CASTING (GREEN ANTICIPATED DATES) ===")
+        logger.info("=== PARSING STRUCTURE - SLAB CASTING (ANTICIPATED DATES) ===")
         logger.info("=" * 80)
 
         target_tower = cls.extract_tower_from_section(section_name)
@@ -782,84 +837,73 @@ class StructureWorkParser:
 
         logger.info(f"Found {len(floor_rows)} floors: {sorted(floor_rows.keys())}")
 
-        green_dates = []
-        green_cells_found = 0
+        matched_dates = []
         total_cells_checked = 0
 
         col_indices = [cls.col_letter_to_index(col) for col in tower_cols]
 
-        logger.info("\n--- Scanning cells for green dates ---")
+        logger.info("\n--- Scanning cells for anticipated dates ---")
 
-        for floor_label in sorted(floor_rows.keys(), key=lambda x: (len(x), x)):
+        def _floor_sort_key(lbl):
+            if lbl == "GF":
+                return (-1, 0)
+            if lbl == "RF":
+                return (999, 0)
+            m = re.fullmatch(r'(\d+)F', lbl)
+            if m:
+                return (0, int(m.group(1)))
+            return (1, lbl)
+
+        for floor_label in sorted(floor_rows.keys(), key=_floor_sort_key):
             row_idx = floor_rows[floor_label]
-            floor_matched_dates = []
 
             for col_letter, col_idx in zip(tower_cols, col_indices):
                 total_cells_checked += 1
                 cell = ws.cell(row=row_idx, column=col_idx)
 
                 cell_value = cell.value
-                is_green = is_cell_green(cell)
 
                 if not cell_value or str(cell_value).strip() in ('########', '-', ''):
                     continue
 
-                if is_green:
-                    green_cells_found += 1
-                    parsed_date = cls.parse_date(cell_value)
-
-                    logger.info(
-                        f"  {col_letter}{row_idx} (Floor {floor_label}): "
-                        f"Value='{cell_value}', Green=YES, Date={parsed_date}"
-                    )
-
-                    if parsed_date:
-                        # Only count if month matches (no fallback)
-                        month_ok = target_month_num is None or parsed_date.month == target_month_num
-                        year_ok = target_year is None or parsed_date.year == target_year
-                        if month_ok and year_ok:
-                            floor_matched_dates.append(parsed_date)
-                            logger.info(f"    ✓ COUNTED: {parsed_date.strftime('%d-%b-%Y')}")
-                    else:
-                        logger.warning(f"    ✗ Could not parse date")
-
-            if floor_matched_dates:
-                latest_floor_date = max(floor_matched_dates)
-                green_dates.append(latest_floor_date)
+                parsed_date = cls.parse_date(cell_value)
                 logger.info(
-                    f"  Floor {floor_label}: selected latest green date "
-                    f"{latest_floor_date.strftime('%d-%b-%Y')}"
+                    f"  {col_letter}{row_idx} (Floor {floor_label}): "
+                    f"Value='{cell_value}', Date={parsed_date}"
                 )
+
+                if not parsed_date:
+                    continue
+
+                month_ok = target_month_num is None or parsed_date.month == target_month_num
+                year_ok = target_year is None or parsed_date.year == target_year
+                if month_ok and year_ok:
+                    matched_dates.append(parsed_date)
+                    logger.info(f"    ✓ COUNTED: {parsed_date.strftime('%d-%b-%Y')}")
 
         logger.info("\n" + "-" * 80)
         logger.info(f"SUMMARY for {target_tower}:")
         logger.info(f"  Total cells checked: {total_cells_checked}")
-        logger.info(f"  Green cells found: {green_cells_found}")
         logger.info(
-            f"  Valid green dates (month {target_month_num}, year {target_year}, latest-per-floor): "
-            f"{len(green_dates)}"
+            f"  Matching anticipated dates (month {target_month_num}, year {target_year}): "
+            f"{len(matched_dates)}"
         )
 
-        if green_dates:
-            logger.info(f"  Date range: {min(green_dates).strftime('%d-%b-%Y')} to {max(green_dates).strftime('%d-%b-%Y')}")
+        if matched_dates:
+            logger.info(
+                f"  Date range: {min(matched_dates).strftime('%d-%b-%Y')} to {max(matched_dates).strftime('%d-%b-%Y')}"
+            )
 
-        if not green_dates:
+        if not matched_dates:
             logger.warning(
-                f"⚠ No green anticipated dates found for {target_tower} "
+                f"⚠ No anticipated dates found for {target_tower} "
                 f"in month {target_month_num}, year {target_year}"
             )
             logger.info("=" * 80 + "\n")
             return []
 
-        # Filter to latest year among matched dates
-        latest_year = max(d.year for d in green_dates)
-        filtered_dates = [d for d in green_dates if d.year == latest_year]
-
-        logger.info(f"  Latest year filter: {latest_year}")
-        logger.info(f"  Dates after filter: {len(filtered_dates)}")
         logger.info("=" * 80 + "\n")
-
-        return sorted(filtered_dates)
+        return sorted(matched_dates)
 
 
 # ============================================================================
